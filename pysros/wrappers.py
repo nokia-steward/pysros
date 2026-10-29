@@ -4,10 +4,11 @@ import operator
 import collections
 
 from abc import abstractmethod
+from decimal import Decimal
 from io import StringIO
 from functools import total_ordering
 
-from .errors import *
+from . import errors as err
 from .errors import make_exception
 from .singleton import _Empty
 from .yang_type import DECIMAL_LEAF_TYPE, INTEGRAL_LEAF_TYPE, YangUnion
@@ -131,9 +132,11 @@ class Schema:
                 self._model.StatementType.anydata_,
                 self._model.StatementType.anyxml_,
             ):
-                return True if self._model.mandatory else False
+                # List keys never expose mandatory.
+                if not self._model.is_local_key:
+                    return self._model.mandatory
         raise make_exception(
-            pysros_err_attr_object_has_no_attribute,
+            err.pysros_err_attr_object_has_no_attribute,
             obj=self.__class__.__name__,
             attribute=attr
         )
@@ -144,6 +147,35 @@ class Schema:
             self.__class__ is other.__class__
             and all(attrs_eq(self, other, attr) for attr in self._attributes)
         )
+
+
+def _format_schema_range(yang_type):
+    # Render the internally normalized range the way the YANG module spells it,
+    # so that off-box and on-box report an identical range to the user.
+    # Normalization stores a compact form ("5|8..10") and drops decimal64
+    # trailing zeroes ("4.0..97.0"), while YANG uses " | " between disjoint
+    # ranges and always writes fraction-digits decimals ("4.00..97.00").
+    range_value = yang_type.yang_range
+    if not range_value:
+        return range_value
+
+    fraction_digits = yang_type.fraction_digits if yang_type.json_name() == "decimal64" else 0
+
+    def format_value(value):
+        value = value.strip()
+        if not fraction_digits:
+            return value
+        value = format(Decimal(value), "f")
+        integral, point, fractional = value.partition(".")
+        if len(fractional) < fraction_digits:
+            fractional += "0" * (fraction_digits - len(fractional))
+        return integral + "." + fractional
+
+    result = []
+    for part in range_value.split("|"):
+        values = part.split("..", 1)
+        result.append("..".join(format_value(value) for value in values))
+    return " | ".join(result)
 
 
 class SchemaType:
@@ -166,6 +198,7 @@ class SchemaType:
     .. Reviewed by PLM 20221005
     .. Reviewed by TechComms 20221005
     """
+
     __slots__ = ("_yang_type")
     _attributes = (
         "range",
@@ -185,12 +218,12 @@ class SchemaType:
     def __getattr__(self, attr):
         if attr == "range":
             if self._yang_type.json_name() in DECIMAL_LEAF_TYPE:
-                return self._yang_type.yang_range
+                return _format_schema_range(self._yang_type)
         if attr == "union_members":
             if isinstance(self._yang_type, YangUnion):
                 return tuple(SchemaType(yt) for yt in self._yang_type)
         raise make_exception(
-            pysros_err_attr_object_has_no_attribute,
+            err.pysros_err_attr_object_has_no_attribute,
             obj=self.__class__.__name__,
             attribute=attr
         )
@@ -245,14 +278,14 @@ class Wrapper:
             object.__setattr__(self, '_annotations', value)
             return
         raise make_exception(
-            pysros_err_attr_is_read_only,
+            err.pysros_err_attr_is_read_only,
             obj=self.__class__.__name__,
             attribute=attr
         )
 
     def __delattr__(self, attr):
         raise make_exception(
-            pysros_err_attr_cannot_be_deleted,
+            err.pysros_err_attr_cannot_be_deleted,
             obj=self.__class__.__name__,
             attribute=attr
         )
@@ -297,7 +330,7 @@ class Wrapper:
     @schema.setter
     def schema(self, _):
         raise make_exception(
-            pysros_err_attr_is_read_only,
+            err.pysros_err_attr_is_read_only,
             obj=self.__class__.__name__,
             attribute='schema'
         )
@@ -375,7 +408,7 @@ class Container(Wrapper):
     def _check_data_type(cls, value):
         if not isinstance(value, dict):
             raise make_exception(
-                pysros_err_unsupported_type_for_wrapper,
+                err.pysros_err_unsupported_type_for_wrapper,
                 wrapper_name=cls.__name__
             )
 
@@ -428,7 +461,7 @@ class LeafList(Wrapper):
     def _check_data_type(cls, values):
         if not isinstance(values, list):
             raise make_exception(
-                pysros_err_unsupported_type_for_wrapper,
+                err.pysros_err_unsupported_type_for_wrapper,
                 wrapper_name=cls.__name__
             )
         for value in values:
@@ -535,7 +568,7 @@ class Leaf(Wrapper):
     def _check_data_type(data):
         if not isinstance(data, (str, int, bool, _Empty)) and data is not None:
             raise make_exception(
-                pysros_err_unsupported_type_for_wrapper,
+                err.pysros_err_unsupported_type_for_wrapper,
                 wrapper_name='Leaf'
             )
 
@@ -594,9 +627,11 @@ del forward_methods
 
 _sentinel = object()
 
+
 class _AnnotationAttr:
     """Internal class for handling attributes of Annotation."""
-    def __set_name__(self, owner, name):
+
+    def __set_name__(self, _owner, name):
         self.public_name = name
         self.private_name = '_' + name
 
@@ -604,14 +639,14 @@ class _AnnotationAttr:
         if self.private_name != '_data':
             setattr(obj, '_model', None)
         if self.private_name == '_key' and not isinstance(value, str):
-            raise make_exception(pysros_err_annotation_type_key)
+            raise make_exception(err.pysros_err_annotation_type_key)
         setattr(obj, self.private_name, value)
 
-    def __get__(self, obj, objtype=None):
+    def __get__(self, obj, _objtype=None):
         value = getattr(obj, self.private_name)
         if value is None:
             raise make_exception(
-                pysros_err_attr_object_has_no_attribute,
+                err.pysros_err_attr_object_has_no_attribute,
                 obj=obj.__class__.__name__,
                 attribute=self.public_name)
         return value
@@ -619,11 +654,12 @@ class _AnnotationAttr:
     def __delete__(self, obj):
         if getattr(obj, self.private_name) is None or self.private_name == '_key':
             raise make_exception(
-                pysros_err_attr_object_has_no_attribute,
+                err.pysros_err_attr_object_has_no_attribute,
                 obj=obj.__class__.__name__,
                 attribute=self.public_name
             )
         setattr(obj, self.private_name, None)
+
 
 @total_ordering
 class Annotation:
@@ -675,12 +711,12 @@ class Annotation:
 
     def __init__(self, key, data=None, *, module=None, namespace=None):
         if not isinstance(key, str):
-            raise make_exception(pysros_err_annotation_type_key)
+            raise make_exception(err.pysros_err_annotation_type_key)
 
         if ':' in key:
             nmodule, key = key.split(':', 1)
             if module is not None and module != nmodule:
-                raise make_exception(pysros_err_annotation_invalid_module)
+                raise make_exception(err.pysros_err_annotation_invalid_module)
             module = nmodule
 
         self._key = key
@@ -732,15 +768,18 @@ class Annotation:
         )
 
     def __lt__(self, other):
-        def is_less(a,b):
+        def is_less(a, b):
             return False if (b is None) else (a is None or a < b)
 
         if self.__class__ is not other.__class__:
             return NotImplemented
 
-        if self._key != other._key: return is_less(self._key, other._key)
-        if self._module != other._module: return is_less(self._module, other._module)
-        if self._namespace != other._namespace: return is_less(self._namespace, other._namespace)
+        if self._key != other._key:
+            return is_less(self._key, other._key)
+        if self._module != other._module:
+            return is_less(self._module, other._module)
+        if self._namespace != other._namespace:
+            return is_less(self._namespace, other._namespace)
         return is_less(self._data, other._data)
 
 
@@ -988,9 +1027,9 @@ class Annotations(collections.UserList):
             return (required is None) or (required == given)
 
         if not isinstance(key, str):
-            raise make_exception(pysros_err_annotation_type_key)
+            raise make_exception(err.pysros_err_annotation_type_key)
 
-        if ':' in key and module == None:
+        if ':' in key and module is None:
             module, key = key.split(':', 1)
 
         idx = None
@@ -1001,18 +1040,18 @@ class Annotations(collections.UserList):
                     or not match(namespace, d._namespace)):
                 continue
 
-            if idx is not  None:
-                raise make_exception(pysros_err_annotation_too_many_instances)
+            if idx is not None:
+                raise make_exception(err.pysros_err_annotation_too_many_instances)
 
             idx = i
 
         if idx is None:
-            raise  make_exception(pysros_err_annotation_not_found)
+            raise make_exception(err.pysros_err_annotation_not_found)
         return idx
 
     def get(self, annotation):
-        """Return the :py:class:`.Annotation` (without an ‘s’) from the :py:class:`.Annotations`
-        (with an ‘s’) class (list) that matches the provided :py:class:`.Annotation`.
+        """Return the :py:class:`.Annotation` (without an 's') from the :py:class:`.Annotations`
+        (with an 's') class (list) that matches the provided :py:class:`.Annotation`.
 
         The match must be identical, that is, all parameters inside the :py:class:`.Annotation`
         class *must match exactly*.
@@ -1059,8 +1098,8 @@ class Annotations(collections.UserList):
 
     def get_annotation(self, key, data=None, *, module=None, namespace=None):
         """
-        Return the :py:class:`.Annotation` (without an ‘s’) from the :py:class:`.Annotations`
-        (with an ‘s’) class (list) that matches the provided :py:attr:`.Annotation.key`.
+        Return the :py:class:`.Annotation` (without an 's') from the :py:class:`.Annotations`
+        (with an 's') class (list) that matches the provided :py:attr:`.Annotation.key`.
         An exception is raised if the :py:class:`Annotation` is not found.
 
         :param key: Name of the :py:class:`Annotation`.  This should match the
@@ -1102,7 +1141,6 @@ class Annotations(collections.UserList):
         """
         idx = self.index_annotation(key, data, module=module, namespace=namespace)
         return self.data[idx]
-
 
     def remove_annotation(self, key, data=None, *, module=None, namespace=None):
         """Remove the :py:class:`.Annotation` object for the searched
@@ -1152,4 +1190,3 @@ class Annotations(collections.UserList):
 
     def __repr__(self):
         return f"Annotations({self.data!r})"
-

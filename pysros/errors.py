@@ -1,9 +1,14 @@
 # Copyright 2021-2026 Nokia
 
-from .exceptions import (ActionTerminatedIncompleteError, InternalError,
+from .exceptions import (InternalError,
                          InvalidPathError, JsonDecodeError,
                          ModelProcessingError, SrosConfigConflictError,
-                         SrosMgmtError, XmlDecodeError, NotSupportedNodeMethodError, make_exception)
+                         SrosMgmtError, NotSupportedNodeMethodError)
+from . import exceptions
+
+make_exception = exceptions.make_exception
+ActionTerminatedIncompleteError = exceptions.ActionTerminatedIncompleteError
+XmlDecodeError = exceptions.XmlDecodeError
 
 __doc__ = """This module contains error definitions for pySROS.
 
@@ -11,7 +16,10 @@ __doc__ = """This module contains error definitions for pySROS.
 .. reviewed by TechComms 20211202
 """
 
-pysros_err_action_subtree_not_supported = (SrosMgmtError, """Md-compare subtree-path is not supported in action method, use compare method instead""")
+pysros_err_action_subtree_not_supported = (
+    SrosMgmtError,
+    """Md-compare subtree-path is not supported in action method, use compare method instead""",
+)
 pysros_err_arg_must_be_string = (TypeError, """Argument "module" must be a string""")
 pysros_err_attr_cannot_be_deleted = (AttributeError, "'{obj}' object attribute '{attribute}' cannot be deleted")
 pysros_err_attr_is_read_only = (AttributeError, "'{obj:.50}' object attribute '{attribute:.100}' is read-only")
@@ -28,7 +36,10 @@ pysros_err_cannot_modify_state = (SrosMgmtError, "Cannot modify state tree")
 pysros_err_cannot_pars_path = (ModelProcessingError, "Cannot parse path {path!r}")
 pysros_err_cannot_remove_node = (ModelProcessingError, "Cannot remove {node}")
 pysros_err_cannot_specify_non_key_leaf = (InvalidPathError, "Cannot specify non-key leaf as path attribute")
-pysros_err_commit_conflicts_detected = (SrosConfigConflictError, "Commit failed - conflict detected, configuration changes cleared")
+pysros_err_commit_conflicts_detected = (
+    SrosConfigConflictError,
+    "Commit failed - conflict detected, configuration changes cleared",
+)
 pysros_err_convert_invalid_value_for_type = (SrosMgmtError, "Invalid value for {name}")
 pysros_err_convert_root_not_support_pysros = (SrosMgmtError, "'pysros' format is not supported for root")
 pysros_err_convert_wrong_payload_type = (TypeError, "Invalid payload type for convert")
@@ -57,7 +68,10 @@ pysros_err_invalid_module_set_id_or_content_id = (RuntimeError, "Invalid module-
 pysros_err_invalid_operation_on_key = (InvalidPathError, "Operation cannot be performed on key")
 pysros_err_invalid_operation_on_leaflist = (InvalidPathError, "Operation cannot be performed on leaflist")
 pysros_err_invalid_path_error = (InvalidPathError, "Path does not exist in schema")
-pysros_err_invalid_path_operation_missing_keys = (InvalidPathError, "Cannot perform operation on list without specifying keys")
+pysros_err_invalid_path_operation_missing_keys = (
+    InvalidPathError,
+    "Cannot perform operation on a list without specifying keys",
+)
 pysros_err_invalid_rd_state = (InternalError, "Invalid database state")
 pysros_err_invalid_target = (ValueError, "Invalid target")
 pysros_err_invalid_transport = (TypeError, "Currently only NETCONF transport is supported")
@@ -76,7 +90,10 @@ pysros_err_no_data_found = (LookupError, "No data found")
 pysros_err_not_connected = (RuntimeError, "Not connected")
 pysros_err_not_found_slash_before_name = (InvalidPathError, "'/' not found before element name")
 pysros_err_path_should_be_string = (TypeError, "Path argument should be a string")
-pysros_err_prefix_does_not_have_ns = (LookupError, "prefix '{prefix}' of '{name}' does not have corresponding namespace")
+pysros_err_prefix_does_not_have_ns = (
+    LookupError,
+    "prefix '{prefix}' of '{name}' does not have corresponding namespace",
+)
 pysros_err_root_path = (InvalidPathError, "Operation cannot be performed on root")
 pysros_err_target_should_be_list = (InvalidPathError, "Target should be a list")
 pysros_err_unended_quoted_string = (InvalidPathError, "Unended quoted string")
@@ -114,7 +131,10 @@ pysros_err_multiple_occurences_of_annotation = (SrosMgmtError, "Multiple occurre
 pysros_err_annotation_incorrect_value = (SrosMgmtError, "Invalid value for annotation '{name}'")
 pysros_err_annotation_not_found = (ValueError, "Annotation not found")
 pysros_err_annotation_too_many_instances = (ValueError, "Too many annotations match the criteria")
-pysros_err_annotation_without_value = (SrosMgmtError, "Missing value for '{child_name}' in path '{path}', but metadata set")
+pysros_err_annotation_without_value = (
+    SrosMgmtError,
+    "Missing value for '{child_name}' in path '{path}', but metadata set",
+)
 pysros_err_annotation_type_key = (TypeError, """Annotation argument "key" must be a string""")
 pysros_err_annotation_invalid_type = (TypeError, "Invalid type of argument annotations_only")
 pysros_err_annotation_invalid = (TypeError, "Cannot find annotation")
@@ -128,7 +148,10 @@ pysros_err_ambiguous_model_node = (SrosMgmtError, "Ambiguous model node")
 pysros_err_unsupported_node_method = (NotSupportedNodeMethodError, "Method not supported by the node")
 pysros_err_commit_confirmed_timer_not_int = (TypeError, "Timer must be positive integer")
 pysros_err_commit_confirmed_timer_negative = (ValueError, "Timer must be positive integer")
-pysros_err_commit_confirmed_timer_and_cancel_disjoin = (ValueError, "Only one of 'cancel' or 'timer' can be set, not both")
+pysros_err_commit_confirmed_timer_and_cancel_disjoin = (
+    ValueError,
+    "Only one of 'cancel' or 'timer' can be set, not both",
+)
 pysros_err_commit_comment_unsupported_node = (NotSupportedNodeMethodError, "Commit comment is supported only on SR OS")
 pysros_err_commit_comment_not_string = (TypeError, "Comment expected to be non-empty string")
 pysros_err_commit_comment_empty = (ValueError, "Comment expected to be non-empty string")

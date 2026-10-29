@@ -22,9 +22,11 @@ from ncclient.operations.rpc import RPCError as nc_RPCError
 from ncclient.transport.errors import TransportError as nc_TransportError
 from ncclient.xml_ import new_ele_nsmap, to_ele
 
-from .errors import *
-from .errors import (ActionTerminatedIncompleteError, SrosMgmtError,
-                     XmlDecodeError, make_exception)
+from . import errors as err
+from .errors import (ActionTerminatedIncompleteError, InternalError,
+                     InvalidPathError, JsonDecodeError,
+                     ModelProcessingError, SrosConfigConflictError,
+                     SrosMgmtError, XmlDecodeError, make_exception)
 from .model import Model
 from .model_builder import ModelBuilder
 from .model_walker import (ActionInputFilteredDataModelWalker,
@@ -36,9 +38,14 @@ from .model_walker import (ActionInputFilteredDataModelWalker,
                            JsonInstanceModelWalkerActionOnly)
 from .request_data import COMMON_NAMESPACES, RequestData
 from .singleton import Empty
-from .wrappers import Container, LeafList, Annotation
+from .wrappers import Container, Annotation
 
-__all__ = ("connect", "sros", "Connection", "Datastore", "Empty", "SrosMgmtError", "InvalidPathError", "ModelProcessingError", "InternalError", "SrosConfigConflictError", "ActionTerminatedIncompleteError", "JsonDecodeError", "XmlDecodeError", )
+__all__ = (
+    "connect", "sros", "Connection", "Datastore", "Empty", "SrosMgmtError",
+    "InvalidPathError", "ModelProcessingError", "InternalError",
+    "SrosConfigConflictError", "ActionTerminatedIncompleteError",
+    "JsonDecodeError", "XmlDecodeError",
+)
 __doc__ = """This module contains basic primitives for managing an SR OS node.
 It contains functions to obtain and manipulate configuration and state data.
 
@@ -161,7 +168,7 @@ def connect(*, host, port=830, username, password=None, yang_directory=None,
     if use_existing_candidate:
         raise NotImplementedError("Supported when executing on SR OS devices only")
     if transport != "netconf":
-        raise make_exception(pysros_err_invalid_transport)
+        raise make_exception(err.pysros_err_invalid_transport)
     return Connection(host=host, port=port, username=username, password=password,
                       device_params={'name': 'sros'},
                       manager_params={'timeout': timeout},
@@ -225,33 +232,60 @@ class Connection:
             self._nc = manager.connect_ssh(*args, **kwargs)
         except Exception as e:
             raise make_exception(
-                pysros_err_could_not_create_conn, reason=e
+                err.pysros_err_could_not_create_conn, reason=e
             ) from None
 
-        self.debug = False
+        close_transport = True
+        try:
+            self.debug = False
 
-        self.running = Datastore(self, 'running')
-        self.intended = Datastore(self, 'intended')
-        self.candidate = Datastore(self, 'candidate')
+            self.running = Datastore(self, 'running')
+            self.intended = Datastore(self, 'intended')
+            self.candidate = Datastore(self, 'candidate')
 
-        self.yang_directory = yang_directory
-        self.rebuild = rebuild
-        self._models = self._get_yang_models()
-        self._ns_map = types.MappingProxyType({model.name: model.namespace for model in self._models})
-        self._ns_map_rev = {v: k for k, v in self._ns_map.items()}
-        self._mod_revs = {model.name: model.revision for model in self._models}
-        self._mod_revs.update((i.name, i.revision) for j in self._models for i in j.submodules)
-        self._sros = any(map(lambda x:x.startswith("urn:nokia.com:sros:ns:yang:sr:major-release"), self._nc.server_capabilities))
-        commit_confirmed_cap = any(map(lambda x:x.startswith("urn:ietf:params:netconf:capability:confirmed-commit:"), self._nc.server_capabilities))
-        candidate_cap = any(map(lambda x:x.startswith("urn:ietf:params:netconf:capability:candidate:"), self._nc.server_capabilities))
-        self._cap_commit_confirmed = commit_confirmed_cap and candidate_cap
-        self.root, self.metadata = self._get_root(self._models)
-        self._metadata_map = {i.name.model_string: i for i in self.metadata}
-        self._metadata_map_no_module = {}
-        self._intensive_checks = False
+            self.yang_directory = yang_directory
+            self.rebuild = rebuild
+            self._models = self._get_yang_models()
+            self._ns_map = types.MappingProxyType({model.name: model.namespace for model in self._models})
+            self._ns_map_rev = {v: k for k, v in self._ns_map.items()}
+            self._mod_revs = {model.name: model.revision for model in self._models}
+            self._sros = any(
+                map(
+                    lambda x: x.startswith("urn:nokia.com:sros:ns:yang:sr:major-release"),
+                    self._nc.server_capabilities,
+                )
+            )
+            self._mod_revs.update((i.name, i.revision) for j in self._models for i in j.submodules)
+            commit_confirmed_cap = any(
+                map(
+                    lambda x: x.startswith(
+                        "urn:ietf:params:netconf:capability:confirmed-commit:"
+                    ),
+                    self._nc.server_capabilities,
+                )
+            )
+            candidate_cap = any(
+                map(
+                    lambda x: x.startswith("urn:ietf:params:netconf:capability:candidate:"),
+                    self._nc.server_capabilities,
+                )
+            )
+            self._cap_commit_confirmed = commit_confirmed_cap and candidate_cap
+            self.root, self.metadata = self._get_root(self._models)
+            self._metadata_map = {i.name.model_string: i for i in self.metadata}
+            self._metadata_map_no_module = {}
+            self._intensive_checks = False
 
-        for v in self.metadata:
-            self._metadata_map_no_module.setdefault(v.name.name, []).append(v)
+            for v in self.metadata:
+                self._metadata_map_no_module.setdefault(v.name.name, []).append(v)
+            close_transport = False
+        finally:
+            if close_transport:
+                self._close_transport()
+
+    def _close_transport(self):
+        with contextlib.suppress(Exception):
+            self._nc.close_session()
 
     def _get_root(self, modules):
         hasher = hashlib.sha256()
@@ -315,12 +349,15 @@ class Connection:
             return f"""{self.yang_directory}/nokia-combined/{yang_name}.yang"""
         if yang_name in self._ns_map:  # module
             for candidate in pathlib.Path(self.yang_directory).rglob(f"{yang_name}*.yang"):
-                if candidate.parts and re.fullmatch(f"{yang_name}[@]{self._mod_revs[yang_name]}.yang", str(candidate.parts[-1])):
+                if candidate.parts and re.fullmatch(
+                    f"{yang_name}[@]{self._mod_revs[yang_name]}.yang",
+                    str(candidate.parts[-1]),
+                ):
                     return candidate
         for candidate in pathlib.Path(self.yang_directory).rglob(f"{yang_name}*.yang"):
             if candidate.parts and re.fullmatch(f"{yang_name}.yang", str(candidate.parts[-1])):
                 return candidate
-        raise make_exception(pysros_err_can_not_find_yang, yang_name=yang_name)
+        raise make_exception(err.pysros_err_can_not_find_yang, yang_name=yang_name)
 
     def _get_yang_models(self):
         subtree = to_ele("""
@@ -364,7 +401,7 @@ class Connection:
 
     def _check_accessibility(self):
         if not self._sros:
-            raise make_exception(pysros_err_unsupported_node_method)
+            raise make_exception(err.pysros_err_unsupported_node_method)
 
     def _action(self, path, value):
         rd = self._request_data(walker=ActionInputFilteredDataModelWalker)
@@ -372,13 +409,13 @@ class Connection:
         if self._intensive_checks:
             rd.sanity_check()
         if not current.is_action():
-            raise make_exception(pysros_err_unsupported_action_path)
+            raise make_exception(err.pysros_err_unsupported_action_path)
         if (
             current._walker.current.name.name == "md-compare"
             and "path" in value
             and "subtree-path" in value["path"]
         ):
-            raise make_exception(pysros_err_action_subtree_not_supported)
+            raise make_exception(err.pysros_err_action_subtree_not_supported)
         current.set(value)
 
         xml_action = etree.Element(f"""{{{COMMON_NAMESPACES["yang_1_0"]}}}action""")
@@ -394,6 +431,11 @@ class Connection:
             print("ACTION response")
             print(response)
 
+        # Standard NETCONF servers (e.g. SR Linux) reply with <ok/> for an
+        # action that produces no YANG-modeled output; there is nothing to decode.
+        if response.xpath("/ncbase:rpc-reply/ncbase:ok", namespaces=COMMON_NAMESPACES):
+            return None
+
         del rd
         rd = self._request_data(walker=ActionOutputFilteredDataModelWalker)
         # data should be wrapped in dummy root. RPC reply can be dummy root if does not have attributes
@@ -403,11 +445,11 @@ class Connection:
             rd.sanity_check()
         current = rd.process_path(path, strict=True)
         model = current.to_model()
-        if model and model['status'].data == "terminated-incomplete":
+        if self._sros and model and model['status'].data == "terminated-incomplete":
             errors = model['error-message'].data
             errors = [e.strip() for e in errors]
             args = errors or ["MINOR: MGMT_AGENT #2007: Operation failed"]
-            raise ActionTerminatedIncompleteError(*args)
+            raise err.ActionTerminatedIncompleteError(*args)
         return model
 
     def _convert(self, path, payload, src_fmt, dst_fmt, pretty_print, action_io):
@@ -416,10 +458,10 @@ class Connection:
                 return ActionInputFilteredDataModelWalker
             elif action_io == "output":
                 return ActionOutputFilteredDataModelWalker
-            raise make_exception(pysros_err_unsupported_action_io)
+            raise make_exception(err.pysros_err_unsupported_action_io)
 
         if not all(fmt in ("xml", "json", "pysros") for fmt in (src_fmt, dst_fmt)):
-            raise make_exception(pysros_err_unsupported_convert_method)
+            raise make_exception(err.pysros_err_unsupported_convert_method)
         rd = self._request_data(
             action=RequestData._Action.convert,
             walker=convert_walker(action_io)
@@ -430,17 +472,21 @@ class Connection:
             current.set(payload)
         elif src_fmt == "xml":
             if not isinstance(payload, str):
-                raise make_exception(pysros_err_convert_wrong_payload_type)
+                raise make_exception(err.pysros_err_convert_wrong_payload_type)
             try:
                 data = to_ele(f"<dummy-root>{payload}</dummy-root>")
             except Exception as e:
-                if isinstance(e, etree.XMLSyntaxError) and len(e.args) and re.match('Attribute .* redefined', e.args[0]):
-                    raise make_exception(pysros_err_multiple_occurences_of_xml_attribute)
-                raise XmlDecodeError(*e.args)
+                if (
+                    isinstance(e, etree.XMLSyntaxError)
+                    and len(e.args)
+                    and re.match('Attribute .* redefined', e.args[0])
+                ):
+                    raise make_exception(err.pysros_err_multiple_occurences_of_xml_attribute)
+                raise err.XmlDecodeError(*e.args)
             current.set_as_xml(data)
         elif src_fmt == "json":
             if not isinstance(payload, str):
-                raise make_exception(pysros_err_convert_wrong_payload_type)
+                raise make_exception(err.pysros_err_convert_wrong_payload_type)
             current.set_as_json(payload)
         else:
             raise NotImplementedError()
@@ -470,12 +516,12 @@ class Connection:
         try:
             if not self._nc.connected:
                 # test wether connection is not disconected before start of the body
-                raise make_exception(pysros_err_not_connected)
+                raise make_exception(err.pysros_err_not_connected)
             yield
         except nc_TransportError:
-            raise make_exception(pysros_err_not_connected) from None
+            raise make_exception(err.pysros_err_not_connected) from None
         except nc_RPCError as e:
-            raise SrosMgmtError(e.message.strip() or str(e).strip()) from None
+            raise err.SrosMgmtError(e.message.strip() or str(e).strip()) from None
 
     def disconnect(self):
         """Disconnect the current transport session. After disconnect,
@@ -511,7 +557,7 @@ class Connection:
         :raises TypeError: If ``destination`` is not a string.
         """
         if destination is None:
-            raise make_exception(pysros_err_path_should_be_string)
+            raise make_exception(err.pysros_err_path_should_be_string)
         dest = pathlib.Path(destination)
 
         # Collect all modules and submodules as (name, revision), deduplicated
@@ -539,7 +585,7 @@ class Connection:
             dest.mkdir(parents=True, exist_ok=True)
             for fname in filenames:
                 if (dest / fname).exists():
-                    raise make_exception(pysros_err_dump_modules_file_exists, fname=fname)
+                    raise make_exception(err.pysros_err_dump_modules_file_exists, fname=fname)
 
         with self._process_connected():
             for (name, revision), fname in zip(files_to_write, filenames):
@@ -589,7 +635,7 @@ class Connection:
             )
             errors = [e.text.strip() for e in errors]
             args = errors or ["MINOR: MGMT_AGENT #2007: Operation failed"]
-            raise ActionTerminatedIncompleteError(*args)
+            raise err.ActionTerminatedIncompleteError(*args)
         output = output.xpath("/ncbase:rpc-reply/nokiaoper:results/nokiaoper:md-cli-output-block", COMMON_NAMESPACES)
         return output[0].text if output else ""
 
@@ -699,7 +745,6 @@ class Connection:
         .. Reviewed by PLM 20220908
 
         """
-        self._check_accessibility()
         with self._process_connected():
             return self._action(path, value)
 
@@ -837,7 +882,7 @@ class Connection:
                print("=" * 79)
                print("%s paramaters" % direction)
                print("-" * 79)
-               for path in c.list_paths("/nokia-oper-perform:perform/card", action_io=direction):
+               for path in connection_object.list_paths("/nokia-oper-perform:perform/card", action_io=direction):
                    print(path)
 
 
@@ -847,19 +892,19 @@ class Connection:
         """
         with self._process_connected():
             walkers = {
-                None    :       JsonInstanceDataModelWalker,
-                "input" :       JsonInstanceModelWalkerWithActionInput,
-                "output":       JsonInstanceModelWalkerWithActionOutput,
-                "action_only":  JsonInstanceModelWalkerActionOnly,
+                None: JsonInstanceDataModelWalker,
+                "input": JsonInstanceModelWalkerWithActionInput,
+                "output": JsonInstanceModelWalkerWithActionOutput,
+                "action_only": JsonInstanceModelWalkerActionOnly,
             }
             try:
-                walker            = walkers[action_io](self.root, self._sros)
+                walker = walkers[action_io](self.root, self._sros)
                 validation_walker = walkers[action_io](self.root, self._sros)
             except KeyError:
-                raise make_exception(pysros_err_unsupported_action_io)
+                raise make_exception(err.pysros_err_unsupported_action_io)
             if path == "/":
                 return walker.export_paths()
-            exception_with_key_value    = None
+            exception_with_key_value = None
             exception_without_key_value = None
             try:
                 walker = walker.user_path_parse(self.root, path, self._sros, verify_keys=True)
@@ -867,15 +912,17 @@ class Connection:
                 exception_with_key_value = e
             for node, keys in zip(walker.path, walker.keys):
                 validation_walker.go_to_child(node.name)
-                if not keys: continue
+                if not keys:
+                    continue
                 for key, value in keys.items():
-                    if all((key != child.name.name and str(child.data_def_stm) == "leaf"
-                        for child in validation_walker.current.children)):
-                        raise make_exception(pysros_err_invalid_key_in_path)
+                    if all(
+                            key != child.name.name and str(child.data_def_stm) == "leaf"
+                            for child in validation_walker.current.children):
+                        raise make_exception(err.pysros_err_invalid_key_in_path)
                     with validation_walker.visit_child(key):
                         type_adjusted_value = validation_walker.get_type().to_value(value)
                         if not validation_walker.check_field_value(value=type_adjusted_value):
-                            raise make_exception(pysros_err_invalid_key_in_path)
+                            raise make_exception(err.pysros_err_invalid_key_in_path)
             if exception_with_key_value is None:
                 return walker.export_paths()
             try:
@@ -902,12 +949,14 @@ class Connection:
         except:
             return self._nc._session.id
 
+
 class Datastore:
     """Datastore object that can be used to perform multiple operations on a specified datastore.
 
     .. Reviewed by PLM 20210614
     .. Reviewed by TechComms 20210705
     """
+
     class _SetAction(Enum):
         set = auto()
         delete = auto()
@@ -918,7 +967,7 @@ class Datastore:
 
     def __init__(self, connection, target):
         if target not in ('running', 'candidate', 'intended', ):
-            raise make_exception(pysros_err_invalid_target)
+            raise make_exception(err.pysros_err_invalid_target)
         self.connection = connection
         self.target = target
         self.transaction = None
@@ -934,7 +983,7 @@ class Datastore:
     def _check_empty_string(self, model_walker):
         for k in model_walker.keys:
             if '' in k.values():
-                raise make_exception(pysros_err_filter_empty_string)
+                raise make_exception(err.pysros_err_filter_empty_string)
 
     def _prepare_root_ele(self, subtree, filter_tag="filter"):
         root = etree.Element(filter_tag)
@@ -972,8 +1021,8 @@ class Datastore:
 
     def _operation_get_data(self, subtree, defaults, path):
         ds_pfx = "ds"
-        xml_get = etree.Element("get-data", nsmap = {None : "urn:ietf:params:xml:ns:yang:ietf-netconf-nmda"})
-        xml_ds = etree.SubElement(xml_get, "datastore", nsmap = {ds_pfx : "urn:ietf:params:xml:ns:yang:ietf-datastores"})
+        xml_get = etree.Element("get-data", nsmap={None: "urn:ietf:params:xml:ns:yang:ietf-netconf-nmda"})
+        xml_ds = etree.SubElement(xml_get, "datastore", nsmap={ds_pfx: "urn:ietf:params:xml:ns:yang:ietf-datastores"})
         xml_ds.text = f"{ds_pfx}:{self.target}"
 
         if subtree:
@@ -989,10 +1038,16 @@ class Datastore:
         return self._nc.rpc(xml_get)
 
     def _get(self, path, *, defaults=False, custom_walker=None, config_only=False, filter=None):
-        model_walker = custom_walker if custom_walker else FilteredDataModelWalker.user_path_parse(self.connection.root, path, self.connection._sros, accept_root=True)
+        model_walker = (
+            custom_walker
+            if custom_walker
+            else FilteredDataModelWalker.user_path_parse(
+                self.connection.root, path, self.connection._sros, accept_root=True,
+            )
+        )
 
         if config_only and model_walker.is_state:
-            raise make_exception(pysros_err_no_data_found)
+            raise make_exception(err.pysros_err_no_data_found)
 
         if config_only or self.target in ("candidate", "intended"):
             model_walker.config_only = True
@@ -1022,9 +1077,9 @@ class Datastore:
                 response = self._operation_get(config, defaults, path)
         else:
             get_method = self._operation_get_data if self.target == "intended" else self._operation_get_config
-            if model_walker.current.config == False:
+            if model_walker.current.config is False:
                 raise make_exception(
-                    pysros_err_can_get_state_from_running_only
+                    err.pysros_err_can_get_state_from_running_only
                 )
             response = get_method(config, defaults, path)
 
@@ -1082,7 +1137,7 @@ class Datastore:
 
     def _handle_annotations_only(self, path, rd, annotations_only):
         requested_cfg_to_strip = rd.to_xml()
-        responded_cfg_to_strip = self._operation_get_config(requested_cfg_to_strip, False, path);
+        responded_cfg_to_strip = self._operation_get_config(requested_cfg_to_strip, False, path)
         del rd
         rd = self.connection._request_data()
         rd.set_as_xml(responded_cfg_to_strip)
@@ -1164,7 +1219,7 @@ class Datastore:
 
     def _delete_root(self, annotations_only):
         if annotations_only:
-            raise make_exception(pysros_err_root_path)
+            raise make_exception(err.pysros_err_root_path)
         rd = self._build_root_delete_request_data()
         children = rd.to_xml()
         if not children:
@@ -1182,14 +1237,14 @@ class Datastore:
 
     def _set(self, path, value, action, method="default", annotations_only=False):
         if self.target in ('running', 'intended'):
-            raise make_exception(pysros_err_cannot_modify_config)
+            raise make_exception(err.pysros_err_cannot_modify_config)
         if path == "/" and action == Datastore._SetAction.delete:
             self._delete_root(annotations_only=annotations_only)
             return
         if method not in ("default", "merge", "replace"):
-            raise make_exception(pysros_err_unsupported_set_method)
+            raise make_exception(err.pysros_err_unsupported_set_method)
         if not isinstance(annotations_only, (bool, list, Annotation)):
-            raise make_exception(pysros_err_annotation_invalid_type)
+            raise make_exception(err.pysros_err_annotation_invalid_type)
         if path == "/" and action == Datastore._SetAction.set and method == "replace":
             self._replace_root(value)
             return
@@ -1199,8 +1254,8 @@ class Datastore:
             self.connection._sros,
             accept_root=True
         )
-        if model_walker.current.config == False:
-            raise make_exception(pysros_err_cannot_modify_state)
+        if model_walker.current.config is False:
+            raise make_exception(err.pysros_err_cannot_modify_state)
 
         model_walker.config_only = True
 
@@ -1211,19 +1266,18 @@ class Datastore:
         else:
             current = rd.process_path(model_walker)
 
-        replacing_leaflist = method=="replace" and current._walker.is_leaflist
         values_to_delete = []
         if action == Datastore._SetAction.delete:
             default_operation = "none"
             if current._walker.is_leaflist:
-                raise make_exception(pysros_err_invalid_operation_on_leaflist)
+                raise make_exception(err.pysros_err_invalid_operation_on_leaflist)
             if annotations_only:
                 rd = self._handle_annotations_only(path, rd, annotations_only)
             else:
                 current.delete()
         else:
             default_operation = None
-            if method=="replace" and current._walker.is_leaflist:
+            if method == "replace" and current._walker.is_leaflist:
                 values_to_delete = self._replace_leaflist(path)
             current.set(value)
             if method == "replace":
@@ -1249,23 +1303,23 @@ class Datastore:
     def _exists(self, path, exist_reason):
         model_walker = FilteredDataModelWalker.user_path_parse(self.connection.root, path, self.connection._sros)
         # if exists is called as a check before deletion, check for path to avoid
-        # incorrect errors such as pysros_err_can_check_state_from_running_only
+        # incorrect errors such as err.pysros_err_can_check_state_from_running_only
         # as we want to handle state delete related errors first
-        if model_walker.current.config == False:
+        if model_walker.current.config is False:
             if exist_reason == Datastore._ExistReason.delete:
-                raise make_exception(pysros_err_cannot_delete_from_state)
+                raise make_exception(err.pysros_err_cannot_delete_from_state)
             elif self.target in ("candidate", "intended"):
                 raise make_exception(
-                    pysros_err_can_check_state_from_running_only
+                    err.pysros_err_can_check_state_from_running_only
                 )
         if exist_reason == Datastore._ExistReason.delete:
             if model_walker.is_local_key:
-                raise make_exception(pysros_err_invalid_operation_on_key)
+                raise make_exception(err.pysros_err_invalid_operation_on_key)
             if model_walker.is_leaflist:
-                raise make_exception(pysros_err_invalid_operation_on_leaflist)
+                raise make_exception(err.pysros_err_invalid_operation_on_leaflist)
         if model_walker.has_missing_keys():
             raise make_exception(
-                pysros_err_invalid_path_operation_missing_keys
+                err.pysros_err_invalid_path_operation_missing_keys
             )
         model_walker.go_to_last_with_presence()
         if model_walker.is_root:
@@ -1290,8 +1344,8 @@ class Datastore:
 
         # get possible errors related to the getting candidate from state before
         # errors related to the incorrect path while calling entry_get_keys
-        if self.target == "candidate" and model_walker.current.config == False:
-            raise make_exception(pysros_err_can_get_state_from_running_only)
+        if self.target == "candidate" and model_walker.current.config is False:
+            raise make_exception(err.pysros_err_can_get_state_from_running_only)
 
         current.entry_get_keys()
 
@@ -1336,9 +1390,9 @@ class Datastore:
 
     def _compare(self, output_format, user_path):
         if self.target != 'candidate':
-            raise make_exception(pysros_err_unsupported_compare_datastore)
+            raise make_exception(err.pysros_err_unsupported_compare_datastore)
         if output_format not in ("md-cli", "xml"):
-            raise make_exception(pysros_err_unsupported_compare_method)
+            raise make_exception(err.pysros_err_unsupported_compare_method)
 
         path = user_path if user_path != "/" else ""
 
@@ -1348,8 +1402,8 @@ class Datastore:
                 path,
                 self.connection._sros
             )
-            if model_walker.current.config == False:
-                raise make_exception(pysros_err_unsupported_compare_endpoint)
+            if model_walker.current.config is False:
+                raise make_exception(err.pysros_err_unsupported_compare_endpoint)
             rd = self.connection._request_data()
             current = rd.process_path(model_walker)
 
@@ -1357,7 +1411,7 @@ class Datastore:
                 rd.sanity_check()
 
             if not current.is_compare_supported_endpoint():
-                raise make_exception(pysros_err_unsupported_compare_endpoint)
+                raise make_exception(err.pysros_err_unsupported_compare_endpoint)
             path = rd.to_xml()
 
         op_ns = COMMON_NAMESPACES["nokiaoper"]
@@ -1398,25 +1452,28 @@ class Datastore:
             xml_trees = etree.fromstring(f"<root>{xml_output}</root>", parser=etree.XMLParser(remove_blank_text=True))
             for xml_tree in xml_trees:
                 etree.indent(xml_tree, space="    ")
-            return "\n".join(etree.tostring(xml_tree, pretty_print=True).decode("utf-8").strip() for xml_tree in xml_trees)
+            return "\n".join(
+                etree.tostring(xml_tree, pretty_print=True).decode("utf-8").strip()
+                for xml_tree in xml_trees
+            )
         return ""
 
     def _commit(self, timer=None, cancel=False, comment=None):
         if not (isinstance(timer, int) or timer is None):
-            raise make_exception(pysros_err_commit_confirmed_timer_not_int)
+            raise make_exception(err.pysros_err_commit_confirmed_timer_not_int)
         if isinstance(timer, int) and not timer > 0:
-            raise make_exception(pysros_err_commit_confirmed_timer_negative)
+            raise make_exception(err.pysros_err_commit_confirmed_timer_negative)
         if cancel and timer:
-            raise make_exception(pysros_err_commit_confirmed_timer_and_cancel_disjoin)
+            raise make_exception(err.pysros_err_commit_confirmed_timer_and_cancel_disjoin)
         if not self.connection._cap_commit_confirmed and (timer or cancel):
-            raise make_exception(pysros_err_unsupported_node_method)
+            raise make_exception(err.pysros_err_unsupported_node_method)
         if comment is not None:
             if not self.connection._sros:
-                raise make_exception(pysros_err_commit_comment_unsupported_node)
+                raise make_exception(err.pysros_err_commit_comment_unsupported_node)
             if not isinstance(comment, str):
-                raise make_exception(pysros_err_commit_comment_not_string)
+                raise make_exception(err.pysros_err_commit_comment_not_string)
             if not comment:
-                raise make_exception(pysros_err_commit_comment_empty)
+                raise make_exception(err.pysros_err_commit_comment_empty)
         try:
             if cancel:
                 self._nc.cancel_commit()
@@ -1433,7 +1490,7 @@ class Datastore:
                 self._nc.discard_changes()
                 self._nc.commit()
                 raise make_exception(
-                    pysros_err_commit_conflicts_detected
+                    err.pysros_err_commit_conflicts_detected
                 ) from None
             raise e from None
 
@@ -1656,12 +1713,12 @@ class Datastore:
         """
         with self.connection._process_connected():
             if self.target in ('running', 'intended'):
-                raise make_exception(pysros_err_cannot_modify_config)
+                raise make_exception(err.pysros_err_cannot_modify_config)
             if path == "/":
                 self._delete_root(annotations_only=annotations_only)
             else:
                 if not self._exists(path, Datastore._ExistReason.delete):
-                    raise make_exception(pysros_err_no_data_found)
+                    raise make_exception(err.pysros_err_no_data_found)
                 self._delete(path, annotations_only)
             if commit:
                 self._commit()
@@ -1746,11 +1803,10 @@ class Datastore:
            lock and mode are left unchanged when the script ends.
 
         .. Reviewed by PLM 20260611
-        .. Reviewed by TechComms 20260611
         """
         with self.connection._process_connected():
             if self.target not in ("candidate", "running"):
-                raise make_exception(pysros_err_cannot_lock_and_unlock_readonly_ds)
+                raise make_exception(err.pysros_err_cannot_lock_and_unlock_readonly_ds)
             self._nc.lock(target=self.target)
 
     def unlock(self):
@@ -1772,11 +1828,10 @@ class Datastore:
            * read-only  - Rejected, because the session does not have a lock
 
         .. Reviewed by PLM 20260611
-        .. Reviewed by TechComms 20260611
         """
         with self.connection._process_connected():
             if self.target not in ("candidate", "running"):
-                raise make_exception(pysros_err_cannot_lock_and_unlock_readonly_ds)
+                raise make_exception(err.pysros_err_cannot_lock_and_unlock_readonly_ds)
             self._nc.unlock(target=self.target)
 
     def commit(self, *, timer=None, cancel=False, comment=None):
@@ -1821,7 +1876,7 @@ class Datastore:
         """
         with self.connection._process_connected():
             if self.target in ('running', 'intended'):
-                raise make_exception(pysros_err_cannot_modify_config)
+                raise make_exception(err.pysros_err_cannot_modify_config)
             self._commit(timer, cancel, comment)
 
     def discard(self):
@@ -1837,7 +1892,7 @@ class Datastore:
         """
         with self.connection._process_connected():
             if self.target in ('running', 'intended'):
-                raise make_exception(pysros_err_cannot_modify_config)
+                raise make_exception(err.pysros_err_cannot_modify_config)
             self._nc.discard_changes()
 
     def compare(self, path="", *, output_format):

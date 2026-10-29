@@ -76,7 +76,7 @@ customers.
 The obtained file can be unzipped and subsequently installed using:
 
 ```shell
-python3 setup.py install
+python3 -m pip install .
 ```
 
 
@@ -91,7 +91,7 @@ The obtained file can be installed using:
 
 ```shell
 git clone https://github.com/nokia/pysros
-python3 setup.py install
+python3 -m pip install .
 ```
 
 ## Documentation and examples ##

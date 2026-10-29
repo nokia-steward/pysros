@@ -4,9 +4,9 @@ import base64
 from abc import ABC, abstractmethod
 from collections import OrderedDict
 from typing import (Any, Dict, Iterable, List, Mapping, NamedTuple, Optional,
-                    Set, Tuple, Union)
+                    Set, Tuple, Type, Union)
 
-from .errors import *
+from . import errors as err
 from .errors import make_exception
 from .identifier import Identifier
 from .model_path import ModelPath
@@ -41,6 +41,7 @@ INTEGRAL_TYPES_MAX = {
 }
 
 assert set(INTEGRAL_LEAF_TYPE) == set(INTEGRAL_TYPES_MIN.keys()) == set(INTEGRAL_TYPES_MAX.keys())
+
 
 class YangTypeBase(ABC):
     """Abstract interface for all leaf types.
@@ -88,7 +89,7 @@ class YangTypeBase(ABC):
         if isinstance(val, bytes):
             return base64.b64encode(val).decode('utf8'), None
         raise make_exception(
-            pysros_err_unexpected_value_of_type,
+            err.pysros_err_unexpected_value_of_type,
             val_type=type(val), type=str(self)
         )
 
@@ -98,7 +99,7 @@ class YangTypeBase(ABC):
             If the value does not fit the expected type, a TypeError exception is raised. This exception is tested
             in union."""
         raise make_exception(
-            pysros_err_invalid_value_for_type, type=self, value=val
+            err.pysros_err_invalid_value_for_type, type=self, value=val
         )
 
     @abstractmethod
@@ -129,7 +130,13 @@ class PrimitiveType(YangTypeBase):
     .. Reviewed by TechComms 20210713
     """
 
-    def __init__(self, name: str, yang_range: Optional[str] = None, fraction_digits: Optional[int] = None, length: Optional[str] = None):
+    def __init__(
+        self,
+        name: str,
+        yang_range: Optional[str] = None,
+        fraction_digits: Optional[int] = None,
+        length: Optional[str] = None,
+    ):
         assert name in YANG_PRIMITIVE_TYPES
         self.identifier = Identifier.builtin(name)
         self.yang_range = yang_range
@@ -184,7 +191,7 @@ class PrimitiveType(YangTypeBase):
         return super().to_value(val)
 
     _check_field_value = {
-        "string": lambda val: type(val) == str,
+        "string": lambda val: isinstance(val, str),
         "empty": lambda val:  val is Empty,
         "boolean": lambda val:  isinstance(val, bool),
         "decimal64": _is_valid_decimal64,
@@ -218,9 +225,12 @@ class PrimitiveType(YangTypeBase):
                 return ""
             else:
                 return obj
-        if self.identifier.name == "boolean" and type(obj) == int:
+        if self.identifier.name == "boolean" and type(obj) is int:
             return bool(obj)
-        elif self.identifier.name in INTEGRAL_LEAF_TYPE and (type(obj) == bool or self.identifier.name in ("int64", "uint64")):
+        elif (
+            self.identifier.name in INTEGRAL_LEAF_TYPE
+            and (type(obj) is bool or self.identifier.name in ("int64", "uint64"))
+        ):
             return int(obj)
         return super().as_storage_type(obj, is_convert, idref_cb)
 
@@ -228,7 +238,13 @@ class PrimitiveType(YangTypeBase):
 class UnresolvedIdentifier(YangTypeBase):
     """Identifier that has not been resolved yet."""
 
-    def __init__(self, identifier: Identifier, yang_range: Optional[str] = None, fraction_digits: Optional[int] = None, length: Optional[str] = None):
+    def __init__(
+        self,
+        identifier: Identifier,
+        yang_range: Optional[str] = None,
+        fraction_digits: Optional[int] = None,
+        length: Optional[str] = None,
+    ):
         self.identifier = identifier
         self.yang_range = yang_range
         self.fraction_digits = fraction_digits
@@ -263,10 +279,10 @@ class UnresolvedIdentifier(YangTypeBase):
         ))
 
     def to_string(self, _val: Any) -> Tuple[str, Optional[str]]:
-        raise make_exception(pysros_err_unresolved_type, type=self)
+        raise make_exception(err.pysros_err_unresolved_type, type=self)
 
     def to_value(self, _val: str) -> Any:
-        raise make_exception(pysros_err_unresolved_type, type=self)
+        raise make_exception(err.pysros_err_unresolved_type, type=self)
 
     def check_field_value(self, value: Any, json=False, strict=False, is_convert=False, metadata=None) -> bool:
         return False
@@ -336,7 +352,12 @@ class YangUnion(YangTypeBase):
             return True
         if isinstance(value, str):
             return True
-        return any(t.check_field_value(value, json=json, strict=strict, is_convert=is_convert, metadata=metadata) for t in self._types)
+        return any(
+            t.check_field_value(
+                value, json=json, strict=strict, is_convert=is_convert, metadata=metadata,
+            )
+            for t in self._types
+        )
 
     def json_name(self) -> str:
         return "union"
@@ -516,10 +537,10 @@ class LeafRef(YangTypeBase):
         return hash((self.__class__.__name__, self._path))
 
     def to_string(self, _val: Any) -> Tuple[str, Optional[str]]:
-        raise make_exception(pysros_err_unresolved_leafref, type=str(self))
+        raise make_exception(err.pysros_err_unresolved_leafref, type=str(self))
 
     def to_value(self, _val: str) -> Any:
-        raise make_exception(pysros_err_unresolved_leafref, type=str(self))
+        raise make_exception(err.pysros_err_unresolved_leafref, type=str(self))
 
     def check_field_value(self, value: Any, json=False, strict=False, is_convert=False, metadata=None) -> bool:
         return False
@@ -581,7 +602,7 @@ class IdentityRef(YangTypeBase):
         identity = self._find_identity(val)
         if not identity:
             raise make_exception(
-                pysros_err_invalid_value_for_type, type=self, value=val
+                err.pysros_err_invalid_value_for_type, type=self, value=val
             )
         return (
             identity.module + ':' + identity.name,
@@ -635,7 +656,9 @@ YangType = Union[
     IdentityRef]
 
 
-_KNOWN_TYPES = {
+_KnownTypeClass = Type[Union[LeafRef, Bits, Enumeration, YangUnion, IdentityRef]]
+
+_KNOWN_TYPES: Dict[str, _KnownTypeClass] = {
     "leafref":     LeafRef,
     "bits":        Bits,
     "enumeration": Enumeration,

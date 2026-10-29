@@ -3,7 +3,7 @@
 import collections
 import re
 
-from .errors import *
+from . import errors as err
 from .errors import make_exception
 
 NL_RE = "[\n]+"
@@ -110,14 +110,14 @@ AFTER_STATEMENT_REGEX = re.compile(f"""(?:\
 #     |        AFTER_FIRST_TOKEN_STATE
 #     INIT_STATE
 
-INIT_STATE                              = 0
-AFTER_FIRST_QUOTED_TOKEN_STATE          = 1
-AFTER_FIRST_TOKEN_STATE                 = 2
-AFTER_FIRST_TOKEN_CONCATINATION_STATE   = 3
-AFTER_SECOND_TOKEN_STATE                = 4
-AFTER_SECOND_QUOTED_TOKEN_STATE         = 5
-AFTER_SECOND_TOKEN_CONCATINATION_STATE  = 6
-AFTER_STATEMENT_STATE                   = 7
+INIT_STATE = 0
+AFTER_FIRST_QUOTED_TOKEN_STATE = 1
+AFTER_FIRST_TOKEN_STATE = 2
+AFTER_FIRST_TOKEN_CONCATINATION_STATE = 3
+AFTER_SECOND_TOKEN_STATE = 4
+AFTER_SECOND_QUOTED_TOKEN_STATE = 5
+AFTER_SECOND_TOKEN_CONCATINATION_STATE = 6
+AFTER_STATEMENT_STATE = 7
 
 STATE_TO_REGEX = (
     INIT_REGEX,
@@ -131,11 +131,11 @@ STATE_TO_REGEX = (
 )
 
 
-TOKEN_KIND_QUOTED_STR    = 0
-TOKEN_KIND_UNQUOTED_STR  = 1
-TOKEN_KIND_STMT_END      = 2
-TOKEN_KIND_BLOCK_BEGIN   = 3
-TOKEN_KIND_BLOCK_END     = 4
+TOKEN_KIND_QUOTED_STR = 0
+TOKEN_KIND_UNQUOTED_STR = 1
+TOKEN_KIND_STMT_END = 2
+TOKEN_KIND_BLOCK_BEGIN = 3
+TOKEN_KIND_BLOCK_END = 4
 TOKEN_KIND_CONCATINATION = 5
 
 TOKEN_NAME_TO_ID = {
@@ -225,7 +225,7 @@ class Tokenizer:
             ahead = self._peek(1)
             if ahead[0] == TOKEN_KIND_QUOTED_STR:
                 self._consume()
-                res = (TOKEN_KIND_QUOTED_STR, res[1]+self._consume()[1])
+                res = (TOKEN_KIND_QUOTED_STR, res[1] + self._consume()[1])
                 self._state = AFTER_FIRST_QUOTED_TOKEN_STATE
                 ahead = self._peek()
             else:
@@ -235,7 +235,7 @@ class Tokenizer:
 
     def _second_token(self):
         res = self._consume()
-        if res[0] in (TOKEN_KIND_UNQUOTED_STR, TOKEN_KIND_CONCATINATION, ): #concatination is `keywork + {` case
+        if res[0] in (TOKEN_KIND_UNQUOTED_STR, TOKEN_KIND_CONCATINATION, ):  # concatination is `keywork + {` case
             self._state = AFTER_SECOND_TOKEN_STATE
             return (TOKEN_KIND_UNQUOTED_STR, res[1])
         elif res[0] in (TOKEN_KIND_STMT_END, TOKEN_KIND_BLOCK_BEGIN, ):
@@ -247,7 +247,7 @@ class Tokenizer:
         while ahead[0] == TOKEN_KIND_CONCATINATION:
             self._consume()
             self._state = AFTER_SECOND_TOKEN_CONCATINATION_STATE
-            res = (TOKEN_KIND_QUOTED_STR, res[1]+self._consume()[1])
+            res = (TOKEN_KIND_QUOTED_STR, res[1] + self._consume()[1])
             self._state = AFTER_SECOND_QUOTED_TOKEN_STATE
             ahead = self._peek()
         self._state = AFTER_SECOND_TOKEN_STATE
@@ -265,7 +265,7 @@ class Tokenizer:
     def _peek(self, offset=0):
         res = self._try_peek(offset)
         if res is None:
-            raise make_exception(pysros_err_unexpected_end_of_yang)
+            raise make_exception(err.pysros_err_unexpected_end_of_yang)
         return res
 
     def _try_consume(self):
@@ -278,15 +278,16 @@ class Tokenizer:
     def _consume(self):
         res = self._try_consume()
         if res is None:
-            raise make_exception(pysros_err_unexpected_end_of_yang)
+            raise make_exception(err.pysros_err_unexpected_end_of_yang)
         return res
 
     def _get_token(self):
         return send_with_default(self._it, STATE_TO_REGEX[self._state], None)
 
     def _populate_read_ahead(self, offset=0):
-        while len(self._ahead_token) < offset+1:
+        while len(self._ahead_token) < offset + 1:
             self._ahead_token.append(self._get_token())
+
 
 def yang_parser(yang, handler):
     it = iter(Tokenizer(yang))
@@ -304,7 +305,10 @@ def yang_parser(yang, handler):
             continue
         kw = token[1]
         token = next(it)
-        assert token[0] in (TOKEN_KIND_QUOTED_STR, TOKEN_KIND_UNQUOTED_STR, TOKEN_KIND_BLOCK_BEGIN, TOKEN_KIND_STMT_END, )
+        assert token[0] in (
+            TOKEN_KIND_QUOTED_STR, TOKEN_KIND_UNQUOTED_STR, TOKEN_KIND_BLOCK_BEGIN,
+            TOKEN_KIND_STMT_END,
+        )
         if token[0] in (TOKEN_KIND_QUOTED_STR, TOKEN_KIND_UNQUOTED_STR, ):
             arg = token[1]
             token = next(it)

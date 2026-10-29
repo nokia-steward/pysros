@@ -19,9 +19,15 @@ When a developer uses only libraries and constructs supported on SR OS, a
 single application may be executed from a development machine or ported
 directly to an SR OS node where the application is executed without modification.
 
-.. Reviewed by PLM 20210902
-.. Reviewed by TechComms 20210902
+.. note::
 
+   The pySROS libraries are not intended to be used for creating applications that
+   run on SR Linux or other Network Operating Systems (NOS). However, the pySROS
+   libraries have been tested to work with other NOS using standards-based NETCONF
+   implementations, specifically, SR Linux.
+
+.. Reviewed by PLM 20261002
+.. Reviewed by TechComms 20261005
 
 
 License
@@ -253,7 +259,7 @@ The obtained file can be unzipped and subsequently installed using:
 
 .. code-block:: python3
 
-   python3 setup.py install
+   python3 -m pip install .
 
 
 .. Reviewed by PLM 20210902
@@ -270,7 +276,7 @@ The obtained file can be installed using the ``git`` tool:
 .. code-block:: python3
 
    git clone https://github.com/nokia/pysros
-   python3 setup.py install
+   python3 -m pip install .
 
 
 .. Reviewed by PLM 20210902

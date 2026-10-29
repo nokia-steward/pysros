@@ -1,12 +1,15 @@
 # Copyright 2021-2026 Nokia
 
+from typing import Any, Dict
+
+
 class _Singleton(type):
-    _instances = {}
+    _instances: Dict[type, Any] = {}
 
     def __new__(cls, *args, **kwargs):
         res = super(_Singleton, cls).__new__(cls, *args, **kwargs)
         res.__copy__ = lambda self: self
-        res.__deepcopy__ = lambda self, memo: self
+        res.__deepcopy__ = lambda self, _memo: self
         res.__reduce__ = lambda self: (self.__class__, ())
         return res
 

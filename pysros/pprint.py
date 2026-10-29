@@ -1,6 +1,6 @@
 # Copyright 2021-2026 Nokia
 
-from .errors import *
+from . import errors as err
 from .errors import make_exception
 from .wrappers import *
 
@@ -59,7 +59,7 @@ class TreePrinter:
         self.depth = int(depth) if depth is not None else None
 
         if self.depth is not None and depth <= 0:
-            raise make_exception(pysros_err_depth_must_be_positive)
+            raise make_exception(err.pysros_err_depth_must_be_positive)
 
     def print(self, obj):
         """Print the specified object.
@@ -162,7 +162,7 @@ class Column:
     """
     def __init__(self, width, name=None, align='<', padding=0):
         if align != '<' and align != '>' and align != '^':
-            raise make_exception(pysros_err_invalid_align, align=align)
+            raise make_exception(err.pysros_err_invalid_align, align=align)
         self.name = name
         self.width = width
         self.align = align
@@ -205,7 +205,7 @@ class Column:
         elif isinstance(arg, tuple):
             return Column(*arg)
         else:
-            raise make_exception(pysros_err_invalid_col_description)
+            raise make_exception(err.pysros_err_invalid_col_description)
 
 
 class Padding(Column):
@@ -549,7 +549,7 @@ class KeyValueTable(ATable):
 
     def _check(self):
         if len([None for c in self._columns if not isinstance(c, Padding)]) % 2 != 0:
-            raise make_exception(pysros_err_even_num_of_columns_required)
+            raise make_exception(err.pysros_err_even_num_of_columns_required)
 
     def _printIter(self, item_iter):
         col_iter = iter(_signalLast(self._columns))

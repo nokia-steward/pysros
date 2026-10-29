@@ -3,14 +3,12 @@
 import copy
 from collections import defaultdict, OrderedDict
 from itertools import chain
-from typing import DefaultDict, Dict, Optional, Set, Union, List
-from decimal import Decimal
+from typing import DefaultDict, Dict, List, Optional, Set, Union
 
-from .errors import *
-from .errors import InvalidPathError, make_exception
+from . import errors as err
+from .errors import make_exception
 from .identifier import Identifier, LazyBindModule, Wildcard
 from .model import AModel, BuildingModel, Model, StorageConstructionModel, YangVersion
-from .model_path import ModelPath
 from .path_utils import get_path
 from .model_walker import DataModelWalker, ModelWalker
 from .request_data import COMMON_NAMESPACES
@@ -24,23 +22,25 @@ from .yang_type import (DECIMAL_LEAF_TYPE, INTEGRAL_TYPES_MAX,
 
 class YangHandler:
     """Handler for yang processing."""
-    from .model_defines import TAGS_WITH_MODEL, TAGS_WITH_IMPLICIT_CASE, TAGS_FORCE_MODULE, TAGS_ARG_IS_IDENTIFIER, \
-                               TAGS_ARG_IS_YANG_PATH_NOT_ABSOLUTE_SCHEMA_ID, TAGS_SHOULD_BE_PROCESSED
+    from .model_defines import TAGS_WITH_MODEL, TAGS_WITH_MODEL_STATUS, TAGS_WITH_IMPLICIT_CASE, TAGS_FORCE_MODULE, \
+        TAGS_ARG_IS_IDENTIFIER, TAGS_ARG_IS_YANG_PATH_NOT_ABSOLUTE_SCHEMA_ID, TAGS_SHOULD_BE_PROCESSED
 
     def __init__(self, builder: "ModelBuilder", root: BuildingModel):
         self.builder = builder
         self.root = root
         self.path = [root]
-        self.full_path = []
+        self.full_path: List[str] = []
         self.grouping_depth = 0
         self.in_type = 0
         self.derived_identities: Dict[Identifier, Set[Identifier]] = {}
-        self.include_stack = [{}]
+        self.include_stack: List[Dict[str, str]] = [{}]
         self.yang_version_stack = [YangVersion()]
         self.module = None
         self._prefix = [None]
         self.ignore_depth = 0
-        self.fake_nodes = [None] # dummy first item to ensure self.fake_nodes[-1] can always be used without checking if the list is empty
+        # Sentinel value so self.fake_nodes[-1] can be used without checking
+        # whether the list is empty.
+        self.fake_nodes = [None]
 
     def enter(self, name, arg):
         if self.ignore_depth or (name not in self.TAGS_SHOULD_BE_PROCESSED and ":" not in name):
@@ -63,22 +63,44 @@ class YangHandler:
             self.path.append(new)
         elif name in self.TAGS_WITH_MODEL:
             new_id = self.get_identifier(arg, name in self.TAGS_FORCE_MODULE)
-            new = BuildingModel(new_id, BuildingModel.StatementType[name.replace("-", "_") + "_"], self.model, self.yang_version)
+            new = BuildingModel(
+                new_id,
+                BuildingModel.StatementType[name.replace("-", "_") + "_"],
+                self.model,
+                self.yang_version,
+            )
             self.path.append(new)
         elif name in ("augment", "deviation", "refine", ):
             new_id = self.get_identifier(name, name in self.TAGS_FORCE_MODULE)
             if self.model.data_def_stm == Model.StatementType.uses_:
                 new = BuildingModel(new_id, BuildingModel.StatementType[name + "_"], self.model, self.yang_version)
-                new.target_path = get_path(arg, absolute_path_allowed=False, relative_path_allowed=True, key_allowed=False, prefix_resolver=self.resolve_prefix)
+                new.target_path = get_path(
+                    arg,
+                    absolute_path_allowed=False,
+                    relative_path_allowed=True,
+                    key_allowed=False,
+                    prefix_resolver=self.resolve_prefix,
+                )
             else:
                 # global augment or deviation
                 new = BuildingModel(new_id, BuildingModel.StatementType[name + "_"], None, self.yang_version)
                 (self.builder.augments if name == "augment" else self.builder.deviations).append(new)
-                new.target_path = get_path(arg, absolute_path_allowed=True, relative_path_allowed=False, key_allowed=False, prefix_resolver=self.resolve_prefix)
+                new.target_path = get_path(
+                    arg,
+                    absolute_path_allowed=True,
+                    relative_path_allowed=False,
+                    key_allowed=False,
+                    prefix_resolver=self.resolve_prefix,
+                )
             self.path.append(new)
         elif name == "grouping":
             new_id = self.get_identifier(arg, name in self.TAGS_FORCE_MODULE)
-            new = BuildingModel(new_id, BuildingModel.StatementType[name.replace("-", "_") + "_"], None, self.yang_version)
+            new = BuildingModel(
+                new_id,
+                BuildingModel.StatementType[name.replace("-", "_") + "_"],
+                None,
+                self.yang_version,
+            )
             self.path.append(new)
             assert new_id not in self.builder.groupings
             self.builder.groupings[new_id] = new
@@ -95,7 +117,15 @@ class YangHandler:
                 else:
                     arg = self.get_identifier(arg, name in self.TAGS_FORCE_MODULE, force_allow_yang_string=True)
             elif name in self.TAGS_ARG_IS_YANG_PATH_NOT_ABSOLUTE_SCHEMA_ID:
-                arg = get_path(arg, absolute_path_allowed=True, relative_path_allowed=True, key_allowed=True, key_expect_path=True, prefix_resolver=self.resolve_prefix, default_module=self.module)
+                arg = get_path(
+                    arg,
+                    absolute_path_allowed=True,
+                    relative_path_allowed=True,
+                    key_allowed=True,
+                    key_expect_path=True,
+                    prefix_resolver=self.resolve_prefix,
+                    default_module=self.module,
+                )
             self.model.blueprint.append((True, (name, arg)))
 
         handle_name = f'handle_early_{name.replace("-", "_DASH_")}'
@@ -190,7 +220,7 @@ class YangHandler:
         return self.include_stack[-1]
 
     @property
-    def yang_version(self)->YangVersion:
+    def yang_version(self) -> YangVersion:
         return self.yang_version_stack[-1]
 
     @yang_version.setter
@@ -260,11 +290,14 @@ class YangHandler:
         self.last_yang_type.length = arg
 
     def handle_status(self, arg: str):
-        self.model.status = arg
+        if len(self.full_path) >= 2 and self.full_path[-2] in self.TAGS_WITH_MODEL_STATUS:
+            self.model.status = arg
 
     def handle_enum(self, value: str):
         if self.in_type:
-            assert isinstance(self.last_yang_type, (Enumeration, UnresolvedIdentifier, )), f"expected Enumeration, got {self.last_yang_type}"
+            assert isinstance(
+                self.last_yang_type, (Enumeration, UnresolvedIdentifier, ),
+            ), f"expected Enumeration, got {self.last_yang_type}"
             self.last_yang_type.add_enum(value)
 
     def handle_bit(self, value: str):
@@ -316,14 +349,14 @@ class YangHandler:
 
     def handle_config(self, arg: str):
         if arg not in ('false', 'true'):
-            raise make_exception(pysros_err_invalid_config)
+            raise make_exception(err.pysros_err_invalid_config)
         self.model.config = (arg == 'true')
 
     def resolve_prefix(self, prefix: str):
         return self.prefixModuleMapping[prefix]
 
 
-def _dummy_getter(filename):
+def _dummy_getter(_filename):
     assert False, "Missing getter"
 
 
@@ -422,7 +455,7 @@ class ModelBuilder:
                 m.default = tdm.default
                 m.default_from_typedef = True
             m.units = tdm.units
-        #RFC6020: If the type referenced by the leaf-list has a default value, it has no effect in the leaf-list.
+        # RFC6020: If the type referenced by the leaf-list has a default value, it has no effect in the leaf-list.
         if m.data_def_stm == AModel.StatementType.leaf_list_ and m.default and m.yang_version == YangVersion.ver1_0:
             m.default = None
 
@@ -469,7 +502,6 @@ class ModelBuilder:
 
         # merge adjacent subranges, such as "0|1..100" to "0..100" or "0..10|11..20" to "0..20"
         def process_subrange(subrange: str):
-            nonlocal yt
             map_f = float if yt.json_name() == "decimal64" else int
             i_subrange = list(map(map_f, subrange.split("..")))
             assert len(i_subrange) in (1, 2)
@@ -559,6 +591,7 @@ class ModelBuilder:
 
     def resolve_groupings(self):
         module = None
+
         def resolve_grouping(m: BuildingModel):
             if m.data_def_stm == BuildingModel.StatementType.uses_:
                 grouping: BuildingModel = self.groupings[m.name]
@@ -569,8 +602,10 @@ class ModelBuilder:
                 process_uses_substmts(m, uses_children)
                 m.annihilate()
                 return False
+
         def resolve_common(m: BuildingModel, module: str):
             assert module is not LazyBindModule()
+
             def resolve_unresolved_prefix(m: BuildingModel):
                 if m.prefix is LazyBindModule():
                     m.prefix = module
@@ -581,16 +616,19 @@ class ModelBuilder:
             process_uses_substmts(m, uses_children, prefix_resolver=resolve_unresolved_prefix)
             m.annihilate()
             return False
+
         def resolve_data(m: BuildingModel):
             nonlocal module
             if m.data_def_stm == BuildingModel.StatementType.module_:
                 module = m.name.name
             if m.data_def_stm == BuildingModel.StatementType.uses_:
                 return resolve_common(m, module)
+
         def resolve_augment(m: BuildingModel):
             if m.data_def_stm == BuildingModel.StatementType.uses_:
                 module = augment.prefix
                 return resolve_common(m, module)
+
         def process_uses_substmts(uses: BuildingModel, substmts: List[BuildingModel], *, prefix_resolver=None):
             for m in substmts:
                 m.recursive_walk(resolve_grouping)
@@ -625,13 +663,13 @@ class ModelBuilder:
                 try:
                     w.go_to(augment.target_path)
                     node = w.current
-                except InvalidPathError:
+                except err.InvalidPathError:
                     remaining.append(augment)
                     continue
                 for i in augment.children:
                     i.deepcopy(node)
             if len(remaining) >= len(current):
-                raise make_exception(pysros_err_unresolved_augment)
+                raise make_exception(err.pysros_err_unresolved_augment)
             current = remaining
 
     def filter_blueprint(self, function, blueprint):
@@ -658,7 +696,12 @@ class ModelBuilder:
                 if deviate.name.name == "delete":
                     for instruction in deviate.blueprint:
                         if instruction[0]:
-                            w.current.blueprint = list(self.filter_blueprint(lambda b: b[0:1] != instruction[1][0:1], w.current.blueprint))
+                            w.current.blueprint = list(
+                                self.filter_blueprint(
+                                    lambda b: b[0:1] != instruction[1][0:1],
+                                    w.current.blueprint,
+                                )
+                            )
                 if deviate.name.name == "replace":
                     self.resolve_deviations_replace(w.current, deviate)
                 if deviate.name.name == "not-supported":
@@ -719,7 +762,12 @@ class ModelBuilder:
         self.root.recursive_walk(resolver)
 
     def resolve_metadata_exceptions(self):
-        new = BuildingModel(Identifier("ietf-netconf", "operation"), BuildingModel.StatementType.annotate_, None, YangVersion.ver1_0)
+        new = BuildingModel(
+            Identifier("ietf-netconf", "operation"),
+            BuildingModel.StatementType.annotate_,
+            None,
+            YangVersion.ver1_0,
+        )
         new.namespace = COMMON_NAMESPACES["ncbase"]
         type = Enumeration()
         type.add_enums("merge", "replace", "create", "delete", "remove")
@@ -733,7 +781,6 @@ class ModelBuilder:
         stack = [new_root]
 
         def enter_fnc(w: DataModelWalker):
-            nonlocal stack
             new = StorageConstructionModel(w.get_name(), w.get_dds(), stack[-1])
             if isinstance(w.current.yang_type, YangUnion):
                 w.current.yang_type.deduplicate()
@@ -752,7 +799,6 @@ class ModelBuilder:
             stack.append(new)
 
         def leave_fnc(w: DataModelWalker):
-            nonlocal stack
             stack.pop()
 
         w.recursive_walk(enter_fnc=enter_fnc, leave_fnc=leave_fnc)
@@ -762,7 +808,12 @@ class ModelBuilder:
 class TypeDefModel:
     __slots__ = ("yang_type", "default", "units")
 
-    def __init__(self, arg: Union[YangType, Model, BuildingModel], default: Optional[str] = None, units: Optional[str] = None) -> None:
+    def __init__(
+        self,
+        arg: Union[YangType, Model, BuildingModel],
+        default: Optional[str] = None,
+        units: Optional[str] = None,
+    ) -> None:
         assert isinstance(arg, (YangTypeBase, AModel))
         if isinstance(arg, AModel):
             self.yang_type = arg.yang_type
@@ -847,7 +898,7 @@ def resolve_typedefs_deep(m: TypeDefModel, typedefs: Dict[Identifier, TypeDefMod
     u_yang_type, u_default, u_units = YangUnion(), None, None
     for sub in m.yang_type:
         tdm = resolve_typedefs_deep(TypeDefModel(sub), typedefs)
-        if type(tdm.yang_type) == YangUnion:
+        if type(tdm.yang_type) is YangUnion:
             for t in tdm.yang_type:
                 u_yang_type.append(t)
         else:

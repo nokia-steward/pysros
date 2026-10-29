@@ -25,16 +25,13 @@ Returned object types
 
 The :py:func:`open` function can be used to open a file. Based on the arguments used
 when this function is called, either a :py:class:`TextIO` or a :py:class:`FileIO` object
-is returned.  In both cases, the object has the same set of
-functions defined, but may have different behaviors depending on the
-type of object.
+is returned.
 
-All functions are documented based on the :py:class:`TextIO` class, however,
-they also apply to the :py:class:`FileIO` class.
-Any differences are documented explicitly.
+When a file is opened in text mode, a :py:class:`TextIO` object is returned.
+This object operates on :py:class:`str` data.  When a file is opened in binary
+mode, a :py:class:`FileIO` object is returned.  This object operates on
+:py:class:`bytes` data.  The methods of each class are documented independently.
 
-.. Reviewed by PLM 20220628
-.. Reviewed by TechComms 20220706
 
 Functions
 ---------
@@ -53,9 +50,10 @@ Functions
                 reading text).
    :type mode: str, optional
 
-   :param buffering: Set the buffering policy.  ``0`` disables buffering (only allowed in binary
-                      mode).  An integer > ``0`` indicates the size, in bytes, of a fixed-size chunk buffer.
-                      When no ``buffering`` argument is given, the file is buffered in chunks.
+   :param buffering: Set the buffering policy.  ``0`` disables buffering, in both text mode and
+                      binary mode.  An integer > ``1`` indicates the size, in bytes, of a fixed-size
+                      chunk buffer.  When ``buffering`` is ``1``, or when no ``buffering`` argument
+                      is given, the file is buffered in chunks of a default size.
    :type buffering: int, optional
 
    :param newline: Control the behavior of universal newlines mode.  Only applies to
@@ -73,8 +71,6 @@ Functions
 
    :raises OSError: File cannot be opened.
 
-.. Reviewed by PLM 20220628
-.. Reviewed by TechComms 20220706
 
 .. _filemodes:
 
@@ -176,10 +172,10 @@ Classes
 
       :param size: Maximum number of characters to read from the stream.  Default ``-1``.
       :type size: int, optional
-      :raises OSError: File is not readable.
+      :returns: Characters read from the stream.
+      :rtype: str
+      :raises UnsupportedOperation: File is not readable.
 
-   .. Reviewed by PLM 20220628
-   .. Reviewed by TechComms 20220706
 
    .. method:: readinto(b, size=None, /)
 
@@ -205,10 +201,8 @@ Classes
 
       :returns: Number of characters written.
       :rtype: int
-      :raises OSError: File is not writable.
+      :raises UnsupportedOperation: File is not writable.
 
-   .. Reviewed by PLM 20220628
-   .. Reviewed by TechComms 20220706
 
    .. method:: seek(offset, whence=0, /)
 
@@ -232,20 +226,17 @@ Classes
       :returns: New absolute position.
       :rtype: int
       :raises OSError: File does not support random access.
+      :raises UnsupportedOperation: Nonzero relative seek is unsupported.
 
-   .. Reviewed by PLM 20220628
-   .. Reviewed by TechComms 20220706
 
    .. method:: tell()
 
-      Obtain the current streams position.
+      Obtain the current stream position.
 
       :returns: Current stream position.
       :rtype: int
       :raises OSError: File does not support random access.
 
-   .. Reviewed by PLM 20220628
-   .. Reviewed by TechComms 20220706
 
    .. method:: flush()
 
@@ -290,19 +281,20 @@ Classes
    .. Reviewed by PLM 20220628
    .. Reviewed by TechComms 20220706
 
-   .. method:: readlines(hint=-1, /)
+   .. method:: readlines()
 
       Return a list of lines from the stream.
 
-      :param hint: No more lines are read if the accumulated total size (in bytes or characters) of
-                   all the lines exceeds the value specified in ``hint``.  This can be
-                   used to control the number of lines read.
-      :type hint: int, optional
       :returns: List of lines
       :rtype: list
 
-   .. Reviewed by PLM 20220628
-   .. Reviewed by TechComms 20220706
+      .. admonition:: Differences to CPython
+         :class: attention
+
+         CPython accepts a ``hint`` argument to limit the number of lines read. The
+         SR OS implementation takes no arguments and always reads until the end of the
+         file (EOF).
+
 
 
    .. method:: readable()
@@ -313,28 +305,24 @@ Classes
                read, ``False`` indicates that it cannot.
       :rtype: bool
 
-   .. Reviewed by PLM 20220628
-   .. Reviewed by TechComms 20220706
 
    .. method:: writable()
 
       Return whether object is opened for writing.
 
-      :returns: Whether the file is writable.  ``True`` indicates that the file can be written to,
-                ``False`` indicates that.
+      :returns: Whether the file is writable. ``True`` indicates that the file can be written to;
+                ``False`` otherwise.
+      :rtype: bool
 
-   .. Reviewed by PLM 20220628
-   .. Reviewed by TechComms 20220706
 
    .. method:: seekable()
 
-      Return whether the object supports random access.  This method may perform a test :py:meth:`seek`.
+      Return whether the object supports random access.
 
-      :returns: Whether the file supports random access (is seekable).  ``True`` if random access
-                is supported.  ``False`` if not.
+      :returns: Whether the file supports random access (is seekable). ``True`` if random access
+                is supported; ``False`` otherwise.
+      :rtype: bool
 
-   .. Reviewed by PLM 20220628
-   .. Reviewed by TechComms 20220706
 
    .. method:: truncate(size=None, /)
 
@@ -374,19 +362,49 @@ Classes
 
 .. class:: FileIO
 
-   File mode object obtained by using the :py:func:`open` function, for example ``open(name, "rb")``.
+   Binary mode object obtained by using the :py:func:`open` function, for example ``open(name, "rb")``.
 
    .. warning::
 
       This class cannot be instantiated directly. Use the :py:func:`open` function.
 
-   .. important::
 
-      The same methods as defined on :py:class:`TextIO` are supported on :py:class:`FileIO`.
-      Any differences are documented below.
+   .. method:: read(size=-1, /)
 
-.. Reviewed by PLM 20220628
-.. Reviewed by TechComms 20220706
+      Read at most ``size`` bytes from stream. If ``size`` is a negative number or omitted,
+      read until the end of the file (EOF).
+
+      :param size: Maximum number of bytes to read from the stream.  Default ``-1``.
+      :type size: int, optional
+      :returns: Bytes read from the stream.
+      :rtype: bytes
+      :raises UnsupportedOperation: File is not readable.
+
+
+   .. method:: readinto(b, size=None, /)
+
+      Read bytes into a pre-allocated, writable, bytes-like object ``b``.
+
+      :param b: Pre-allocated, writable bytes-like object.
+      :type b: bytes
+      :param size: The maximum size of bytes to read from the stream. Default ``None``.
+      :type size: int, optional
+
+      :returns: Number of bytes read.
+      :rtype: int
+
+
+   .. method:: write(b, /)
+
+      Write the provided bytes to the stream.
+
+      :param b: Bytes to be written to the file.
+      :type b: bytes
+
+      :returns: Number of bytes written.
+      :rtype: int
+      :raises UnsupportedOperation: File is not writable.
+
 
    .. method:: seek(offset, whence=0, /)
 
@@ -397,11 +415,10 @@ Classes
       :type offset: int
       :param whence: Starting position.  Accepted values:
 
-                        * ``0`` -- Seek from the start of the stream.  ``offset`` should be ``0``
+                        * ``0`` -- From the start of the stream. ``offset`` should be ``0``
                           or a positive integer.
-                        * ``1`` -- Seek to the current position.  ``offset`` may be a negative
-                          integer.
-                        * ``2`` -- Seek to the end of the stream.  ``offset`` is usually a negative
+                        * ``1`` -- From the current position. ``offset`` may be negative, or positive integer.
+                        * ``2`` -- Seek to the end of the stream. ``offset`` is usually a negative
                           integer.
 
                      Default ``0``.
@@ -410,100 +427,406 @@ Classes
       :rtype: int
       :raises OSError: The file does not support random access.
 
-   .. Reviewed by PLM 20220628
-   .. Reviewed by TechComms 20220706
+
+   .. method:: tell()
+
+      Obtain the current stream position.
+
+      :returns: Current stream position.
+      :rtype: int
+      :raises OSError: File does not support random access.
+
+
+   .. method:: flush()
+
+      Flush the write buffers, if applicable.
+
+
+   .. method:: close()
+
+      Flush and close the IO object.
+
+      This method has no effect if the file is already closed.
+
+
+   .. method:: writelines(lines, /)
+
+      Write a list of lines to stream.
+
+      Line separators are not added. It is normal for each of the lines provided
+      to have a line separator at the end.
+
+      :param lines: List of lines to be written.
+      :type lines: list
+
+
+   .. method:: readline(size=-1, /)
+
+      Read until a newline is found or until the end of the file is reached. Return a
+      bytes object containing a single line.
+
+      :param size: Maximum number of bytes to be read.
+      :type size: int, optional
+      :returns: A single bytes object containing the requested line. If the stream is already at
+                the end of the file (EOF), an empty bytes object is returned.
+      :rtype: bytes
+
+
+   .. method:: readlines()
+
+      Return a list of lines from the stream.
+
+      :returns: List of lines
+      :rtype: list
+
+      .. admonition:: Differences to CPython
+         :class: attention
+
+         CPython accepts a ``hint`` argument to limit the number of lines read. The
+         SR OS implementation takes no arguments and always reads until the end of the
+         file (EOF).
+
+
+   .. method:: readable()
+
+      Return whether object is opened for reading.
+
+      :returns: Whether the file is readable. ``True`` indicates that the file can be
+               read; ``False`` otherwise.
+      :rtype: bool
+
+
+   .. method:: writable()
+
+      Return whether object is opened for writing.
+
+      :returns: Whether the file is writable. ``True`` indicates that the file can be written to;
+                ``False`` otherwise.
+      :rtype: bool
+
+
+   .. method:: seekable()
+
+      Return whether the object supports random access.
+
+      :returns: Whether the file supports random access (is seekable). ``True`` if random access
+                is supported.  ``False`` otherwise.
+      :rtype: bool
+
+
+   .. method:: truncate(size=None, /)
+
+      Truncate file to size bytes.
+
+      .. note::
+
+         The file pointer is left unchanged.
+
+      :param size: Size to truncate the file to. Defaults to ``None`` which is interpreted as the
+                   current seek position as reported by :py:meth:`tell`.
+      :type size: int, optional
+      :returns: The new size of the file.
+
+      :raises OSError: File does not support random access.
+
+
+   .. attribute:: buffered
+      :type: bool
+
+   .. attribute:: closed
+      :type: bool
+
+   .. attribute:: mode
+      :type: str
+
+   .. attribute:: name
+      :type: str
+
+   .. attribute:: newlines
+      :type: str or None
+
 
 .. class:: StringIO([string])
+           StringIO(alloc_size)
 
    In-memory file-like object for input/output use for text-mode I/O, similar to a normal file
    opened with ``t`` file mode (See :ref:`filemodes` for more information).
 
    :param string: Initial contents of the file-like object.
    :type string: str
+   :param alloc_size: Amount of memory to pre-allocate.
+   :type alloc_size: int
 
    :raises OSError: File-like object cannot be created.
 
-   .. important::
+   The ``alloc_size`` constructor creates an empty :py:class:`StringIO` object and pre-allocates 
+   ``alloc_size`` bytes. With this constructor, writing up to that many bytes does not reallocate 
+   the buffer, so it avoids out-of-memory or memory-fragmentation issues.
 
-      The same methods as defined on :py:class:`TextIO` are supported on :py:class:`StringIO`.
-      Any differences or additions are documented below.
+   .. warning::
 
-.. Reviewed by PLM 20220628
-.. Reviewed by TechComms 20220706
+      The ``alloc_size`` constructor is a specific MicroPython extension and is recommended
+      for use only in special cases and in system-level libraries. It is not recommended
+      for use in end-user applications.
+
+
+   .. method:: read(size=-1, /)
+
+      Read at most ``size`` characters from stream. If ``size`` is a negative number or omitted,
+      read until the end of the stream.
+
+      :param size: Maximum number of characters to read from the stream. Default ``-1``.
+      :type size: int, optional
+      :returns: Characters read from the stream.
+      :rtype: str
+
+
+   .. method:: readinto(b, size=None, /)
+
+      Read bytes into a pre-allocated, writable, bytes-like object ``b``.
+
+      :param b: Pre-allocated, writable bytes-like object.
+      :type b: bytes
+      :param size: The maximum size of bytes to read from the stream. Default ``None``.
+      :type size: int, optional
+
+      :returns: Number of bytes read.
+      :rtype: int
+
+
+   .. method:: write(text, /)
+
+      Write the provided text to the stream.
+
+      :param text: String to be written to the stream.
+      :type text: str
+
+      :returns: Number of characters written.
+      :rtype: int
+
+
+   .. method:: seek(offset, whence=0, /)
+
+      Change the stream position to ``offset`` bytes relative to ``whence``.
+
+      :param offset: Byte offset from ``whence``.
+      :type offset: int
+      :param whence: Starting position.  Accepted values:
+
+                        * ``0`` -- From the start of the stream. ``offset`` should be ``0``
+                          or a positive integer.
+                        * ``1`` -- From the current position. ``offset`` may be negative, or positive integer.
+                        * ``2`` -- Seek to the end of the stream. ``offset`` is usually a negative
+                          integer.
+
+                     Default ``0``.
+      :type whence: int, optional
+      :returns: New absolute position.
+      :rtype: int
+
+
+   .. method:: tell()
+
+      Obtain the current stream position.
+
+      :returns: Current stream position.
+      :rtype: int
+
+
+   .. method:: flush()
+
+      Flush the write buffers, if applicable.
+
+
+   .. method:: close()
+
+      Flush and close the IO object.
+
+      This method has no effect if the file is already closed.
+
+
+   .. method:: readline(size=-1, /)
+
+      Read until a newline is found or until the end of the stream is reached.  Return a
+      string containing a single line.
+
+      :param size: Maximum number of characters to be read.
+      :type size: int, optional
+      :returns: A single string containing the requested line. If the stream is already at
+                the end of the stream, an empty string is returned.
+      :rtype: str
+
 
    .. method:: getvalue()
 
       Obtain the current contents of the underlying buffer that holds data.
 
       :returns: Contents of the underlying buffer.
+      :rtype: str
 
-   .. Reviewed by PLM 20220628
-   .. Reviewed by TechComms 20220706
 
 
 .. class:: BytesIO([string])
+           BytesIO(alloc_size)
 
    In-memory file-like object for input/output use for binary-mode I/O, similar to a normal file
    opened with the ``b`` file mode (See :ref:`filemodes` for more information).
 
    :param string: Initial contents of the file-like object.
    :type string: bytes
+   :param alloc_size: Amount of memory to pre-allocate.
+   :type alloc_size: int
 
    :raises OSError: File-like object cannot be created.
 
-   .. important::
+   The ``alloc_size`` constructor creates an empty :py:class:`BytesIO` object and pre-allocates
+   ``alloc_size`` bytes. With this constructor, writing up to that many bytes does not
+   reallocate the buffer, so it avoids out-of-memory or memory-fragmentation issues.
 
-      The same methods as defined on :py:class:`TextIO` are supported on :py:class:`BytesIO`.
-      Any differences or additions are documented below.
+   .. warning::
 
-.. Reviewed by PLM 20220628
-.. Reviewed by TechComms 20220706
+      The ``alloc_size`` constructor is a specific MicroPython extension and is recommended
+      for use only in special cases and in system-level libraries. It is not recommended
+      for use in end-user applications.
+
+
+   .. method:: read(size=-1, /)
+
+      Read at most ``size`` bytes from stream. If ``size`` is a negative number or omitted,
+      read until the end of the stream.
+
+      :param size: Maximum number of bytes to read from the stream.  Default ``-1``.
+      :type size: int, optional
+      :returns: Bytes read from the stream.
+      :rtype: bytes
+
+
+   .. method:: read1(size=-1, /)
+
+      Read at most ``size`` bytes from stream using at most one underlying read
+      operation. If ``size`` is a negative number or omitted, read until the end
+      of the stream.
+
+      :param size: Maximum number of bytes to read from the stream. Default ``-1``.
+      :type size: int, optional
+      :returns: Bytes read from the stream.
+      :rtype: bytes
+
+
+   .. method:: readinto(b, size=None, /)
+
+      Read bytes into a pre-allocated, writable, bytes-like object ``b``.
+
+      :param b: Pre-allocated, writable bytes-like object.
+      :type b: bytes
+      :param size: The maximum size of bytes to read from the stream. Default ``None``.
+      :type size: int, optional
+
+      :returns: Number of bytes read.
+      :rtype: int
+
+
+   .. method:: readinto1(b, size=None, /)
+
+      Read bytes into a pre-allocated, writable, bytes-like object ``b``, using at most
+      one underlying read operation.
+
+      :param b: Pre-allocated, writable bytes-like object.
+      :type b: bytes
+      :param size: The maximum size of bytes to read from the stream. Default ``None``.
+      :type size: int, optional
+
+      :returns: Number of bytes read.
+      :rtype: int
+
+
+   .. method:: write(b, /)
+
+      Write the provided bytes to the stream.
+
+      :param b: Bytes to be written to the stream.
+      :type b: bytes
+
+      :returns: Number of bytes written.
+      :rtype: int
+
+
+   .. method:: seek(offset, whence=0, /)
+
+      Change the stream position to the given byte ``offset`` relative to the position
+      indicated by ``whence``.
+
+      :param offset: Byte offset from ``whence``.
+      :type offset: int
+      :param whence: Starting position.  Accepted values:
+
+                        * ``0`` -- From the start of the stream. ``offset`` should be ``0``
+                          or a positive integer.
+                        * ``1`` -- From the current position. ``offset`` may be negative, or positive integer.
+                        * ``2`` -- Seek to the end of the stream. ``offset`` is usually a negative
+                          integer.
+
+                     Default ``0``.
+      :type whence: int, optional
+      :returns: New absolute position.
+      :rtype: int
+
+
+   .. method:: tell()
+
+      Obtain the current stream position.
+
+      :returns: Current stream position.
+      :rtype: int
+
+
+   .. method:: flush()
+
+      Flush the write buffers, if applicable.
+
+
+   .. method:: close()
+
+      Flush and close the IO object.
+
+      This method has no effect if the file is already closed.
+
+
+   .. method:: readline(size=-1, /)
+
+      Read until a newline is found or until the end of the stream is reached. Return a
+      bytes object containing a single line.
+
+      :param size: Maximum number of bytes to be read.
+      :type size: int, optional
+      :returns: A single bytes object containing the requested line. If the stream is already at
+                the end of the stream, an empty bytes object is returned.
+      :rtype: bytes
+
 
    .. method:: getvalue()
 
       Obtain the current contents of the underlying buffer that holds data.
 
       :returns: Contents of the underlying buffer.
-
-   .. Reviewed by PLM 20220628
-   .. Reviewed by TechComms 20220706
+      :rtype: bytes
 
 
-.. class:: StringIO(alloc_size)
-   :noindex:
 
-   Create an empty :py:class:`StringIO` object, pre-allocated to consume ``alloc_size`` bytes.
-   With this method, writing the specific amount of bytes does not lead to reallocation
-   of the buffer and therefore does not result in out-of-memory or memory-fragmentation issues.
+Exceptions
+----------
 
-   .. warning::
+.. exception:: UnsupportedOperation
 
-      This constructor is a specific MicroPython extension and is recommended for use only
-      in special cases and in system-level libraries.  It is not recommended for use in
-      end-user applications.
+   Exception raised when an unsupported operation is attempted on a stream.
 
-   :param alloc_size: Amount of memory to pre-allocate (consume).
-   :type alloc_size: bytes
+   Examples include reading from a file that is not readable, writing to a file
+   that is not writable, or performing a nonzero relative seek on a
+   :py:class:`TextIO` object.
 
-.. Reviewed by PLM 20220628
-.. Reviewed by TechComms 20220706
+   .. admonition:: Differences to CPython
+      :class: attention
 
+      In CPython, this exception inherits from both :exc:`OSError` and
+      :exc:`ValueError`. The SR OS implementation inherits from :exc:`Exception`.
 
-.. class:: BytesIO(alloc_size)
-   :noindex:
-
-   Create an empty :py:class:`BytesIO` object, pre-allocated to consume ``alloc_size`` bytes.
-   With this method, writing the specific amount of bytes does not lead to reallocation
-   of the buffer and therefore does not result in out-of-memory or memory-fragmentation issues.
-
-   .. warning::
-
-      This constructor is a specific MicroPython extension and is recommended for use only
-      in special cases and in system-level libraries.  It is not recommended for use in
-      end-user applications.
-
-   :param alloc_size: Amount of memory to pre-allocate (consume).
-   :type alloc_size: bytes
-
-.. Reviewed by PLM 20220628
-.. Reviewed by TechComms 20220706

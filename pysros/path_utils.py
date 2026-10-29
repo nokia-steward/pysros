@@ -1,12 +1,12 @@
-from .model_path import ModelPath
 from .identifier import Identifier
 from .singleton import _Singleton
 from .model_walker import ModelWalker
 
 import re
 import functools
-import contextlib
-from typing import Optional, List, Iterable, Tuple, Dict, Union
+from re import Match
+from typing import Iterable, List, Optional, Tuple, Dict, Union
+
 
 class LevelUp(metaclass=_Singleton):
     def __str__(self):
@@ -60,6 +60,7 @@ class AbsolutePath(_Path):
 
 class RelativePath(_Path):
     pass
+
 
 """
 leafref:
@@ -274,7 +275,7 @@ class Tokenizer:
     def __init__(self, s: str):
         self.s = s
         self.pos = 0
-        self.current_match = None
+        self.current_match: Optional[Match[str]] = None
 
     def consume(self, regex: Iterable[str]):
         if self.finished:
@@ -308,7 +309,10 @@ class Tokenizer:
         return self.pos >= len(self.s)
 
 
-_ = (SLASH_RE, BRACKET_OPEN_RE, BRACKET_CLOSE_RE, EQ_RE, CURRENT_FNC_RE, PARENT_NODE_RE, CURRENT_NODE_RE, IDENTIFIER_RE, NAME_RE, QUOTED_STR_RE, )
+_ = (
+    SLASH_RE, BRACKET_OPEN_RE, BRACKET_CLOSE_RE, EQ_RE, CURRENT_FNC_RE,
+    PARENT_NODE_RE, CURRENT_NODE_RE, IDENTIFIER_RE, NAME_RE, QUOTED_STR_RE,
+)
 
 """
     absolute_path
@@ -334,7 +338,16 @@ _ = (SLASH_RE, BRACKET_OPEN_RE, BRACKET_CLOSE_RE, EQ_RE, CURRENT_FNC_RE, PARENT_
 
 
 class Parser:
-    def __init__(self, s: str, *, key_allowed, absolute_path_allowed, relative_path_allowed, prefix_resolver=None, key_expect_path=None):
+    def __init__(
+        self,
+        s: str,
+        *,
+        key_allowed,
+        absolute_path_allowed,
+        relative_path_allowed,
+        prefix_resolver=None,
+        key_expect_path=None,
+    ):
         assert key_expect_path is not None or not key_allowed
         self.tokenizer = Tokenizer(s)
         self.key_allowed = key_allowed

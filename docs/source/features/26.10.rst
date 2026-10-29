@@ -1,0 +1,14 @@
+Release 26.10
+*************
+
+26.10.1
+#######
+
+* Moves packaging configuration from ``setup.py`` to ``pyproject.toml``
+* Updates the ``ncclient`` dependency to version 0.7.1
+
+
+
+
+
+

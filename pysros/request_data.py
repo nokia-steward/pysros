@@ -7,13 +7,13 @@ import itertools
 from abc import ABC, abstractmethod
 from collections import OrderedDict
 from enum import Enum, auto
-from typing import Dict, Union
+from typing import Any, Dict, List, Tuple, Union, cast
 
 from lxml import etree
 from ncclient.xml_ import to_ele
 
-from .errors import *
-from .errors import JsonDecodeError, SrosMgmtError, make_exception
+from . import errors as err
+from .errors import make_exception
 from .identifier import Identifier, NoModule
 from .model import Model
 from .model_walker import FilteredDataModelWalker, ModelWalker
@@ -48,7 +48,11 @@ _get_qual_tag_name = lambda x, rev_ns_map: f"""{rev_ns_map.get(_get_tag_ns(x), "
 _text_in_tag_tail = lambda x: x.tail and x.tail.strip()
 _text_in_tag_text = lambda x: x.text and x.text.strip()
 _create_root_ele = lambda: etree.Element("dummy-root", nsmap={"nokia-attr": COMMON_NAMESPACES["attrs"]})
-_metadata_from_xml = lambda e, rev_ns_map: {Identifier(rev_ns_map.get(_get_tag_ns(k), ""),_get_tag_name(k)).model_string: v for k, v in e.attrib.items()} if e.attrib else {}
+_metadata_from_xml = lambda e, rev_ns_map: {
+    Identifier(rev_ns_map.get(_get_tag_ns(k), ""), _get_tag_name(k)).model_string: v
+    for k, v in e.attrib.items()
+} if e.attrib else {}
+
 
 def subelement(parent, tag, nsmap, text=None, attrib=None, add_ns=None):
     """Wrapper around etree.Subelement, that raises SrosMgmtError instead of ValueError."""
@@ -74,17 +78,17 @@ def subelement(parent, tag, nsmap, text=None, attrib=None, add_ns=None):
         if text is not None:
             result.text = text
         return result
-    except ValueError as err:
-        raise SrosMgmtError(err.args) from None
+    except ValueError as exc:
+        raise err.SrosMgmtError(exc.args) from None
 
 
 def _raise_invalid_text_exception(tag, check_parent_tag=True):
     tag_to_check = tag.getparent() if check_parent_tag else tag
     if tag_to_check.tag == "dummy-root":
-        raise make_exception(pysros_err_invalid_xml_root)
+        raise make_exception(err.pysros_err_invalid_xml_root)
     else:
         raise make_exception(
-            pysros_err_invalid_xml_element,
+            err.pysros_err_invalid_xml_element,
             element=_get_tag_name(tag_to_check)
         )
 
@@ -94,7 +98,7 @@ def _raise_unknown_attribute(name):
         module = getattr(name, 'module', None)
         name = module + ':' + name.key if module else name.key
     raise make_exception(
-        pysros_err_unknown_attribute,
+        err.pysros_err_unknown_attribute,
         name=name
     )
 
@@ -109,10 +113,22 @@ class RequestData:
         basic = auto()
         convert = auto()
 
-    def __init__(self, root: Model, annotations: Dict[str, Model], annotations_no_module: Dict[str, Model], ns_map: dict, ns_map_rev: dict, sros: bool, *, action: _Action = _Action.basic, walker=FilteredDataModelWalker):
+    def __init__(
+        self,
+        root: Model,
+        annotations: Dict[str, Model],
+        annotations_no_module: Dict[str, List[Model]],
+        ns_map: dict,
+        ns_map_rev: dict,
+        sros: bool,
+        *,
+        action: _Action = _Action.basic,
+        walker=FilteredDataModelWalker,
+    ):
         self._sros = sros
         self._root = root
         self._Walker = walker
+        self._return_blocked_regions = False
         self._data = _ListStorage(root, self)
         self._ns_map = ns_map
         self._ns_map_rev = ns_map_rev
@@ -121,30 +137,42 @@ class RequestData:
         self._modeled_metadata = annotations
         self._modeled_metadata_no_module = annotations_no_module
 
+    def _make_walker(self, model):
+        walker = self._Walker(model, self._sros)
+        walker.return_blocked_regions = self._return_blocked_regions
+        return walker
+
     def process_path(self, path: Union[str, FilteredDataModelWalker], *, strict=False):
         """Create all entries in given path and return setter for last section of the path.
 
         .. Reviewed by TechComms 20210712
         """
-        walker = path if isinstance(path, ModelWalker) else self._Walker.user_path_parse(self._root, path, self._sros, accept_root=(self._action == self._Action.convert))
+        walker = (
+            path
+            if isinstance(path, ModelWalker)
+            else self._Walker.user_path_parse(
+                self._root, path, self._sros,
+                accept_root=(self._action == self._Action.convert),
+            )
+        )
         current = _ASetter.create_setter(self._data, self)
         for elem, keys in zip(walker.path, walker.keys):
             if not isinstance(current, _MoSetter):
-                raise make_exception(pysros_err_missing_keys, element=current._walker.get_name())
+                raise make_exception(err.pysros_err_missing_keys, element=current._walker.get_name())
             if elem.data_def_stm not in FIELD_STATEMENT_TYPES:
                 if strict and not current.child_mos.is_created(elem.name):
-                    raise make_exception(pysros_err_no_data_found)
+                    raise make_exception(err.pysros_err_no_data_found)
                 current = current.child_mos.get_or_create(elem.name)
                 if keys:
                     if strict and not current.entry_exists_nocheck(keys):
-                        raise make_exception(pysros_err_no_data_found)
+                        raise make_exception(err.pysros_err_no_data_found)
                     current = current.entry_nocheck(keys)
             elif current.keys.can_contains(elem.name):
                 current = current.keys.get(elem.name)
             else:
                 if not current.fields.contains(elem.name):
                     if strict:
-                        raise make_exception(pysros_err_no_data_found)
+                        raise make_exception(err.pysros_err_no_data_found)
                     else:
                         current.fields.set_getValue(elem.name)
                 current = current.fields.get(elem.name)
@@ -156,20 +184,25 @@ class RequestData:
 
         .. Reviewed by TechComms 20210712
         """
-        d = value.xpath("/ncbase:rpc-reply/*[local-name() = 'data']", namespaces={"ncbase": "urn:ietf:params:xml:ns:netconf:base:1.0"})
+        d = value.xpath(
+            "/ncbase:rpc-reply/*[local-name() = 'data']",
+            namespaces={"ncbase": "urn:ietf:params:xml:ns:netconf:base:1.0"},
+        )
         if len(d) != 1:
-            raise make_exception(pysros_err_wrong_netconf_response)
+            raise make_exception(err.pysros_err_wrong_netconf_response)
         d = d[0]
 
+        self._return_blocked_regions = True
         root = _ASetter.create_setter(self._data, self)
         root.set_as_xml(d)
 
     def set_action_as_xml(self, path, value):
         data = value.xpath("/ncbase:rpc-reply", namespaces={"ncbase": "urn:ietf:params:xml:ns:netconf:base:1.0"})
         if len(data) != 1:
-            raise make_exception(pysros_err_wrong_netconf_response)
+            raise make_exception(err.pysros_err_wrong_netconf_response)
         data = data[0]
 
+        self._return_blocked_regions = True
         self.process_path(path).set_as_xml(data)
 
     def to_xml(self):
@@ -286,7 +319,7 @@ class _AStorage(ABC):
 
     @property
     def _walker(self):
-        return self.rd._Walker(self._model, self.rd._sros)
+        return self.rd._make_walker(self._model)
 
     def _resolve_xml_name(self, model, ns_map):
         if model.name.prefix in ns_map:
@@ -294,7 +327,7 @@ class _AStorage(ABC):
         elif model.name.prefix is NoModule():
             return model.name.name
         else:
-            raise make_exception(pysros_err_prefix_does_not_have_ns, prefix=model.name.prefix, name=model.name.name)
+            raise make_exception(err.pysros_err_prefix_does_not_have_ns, prefix=model.name.prefix, name=model.name.name)
 
     def _metadata_to_model(self, metadata):
         is_leaflist = self._walker.is_leaflist
@@ -306,7 +339,15 @@ class _AStorage(ABC):
             res.append(Annotations())
             for k, v in m.items():
                 model = self.rd._modeled_metadata[k]
-                res[-1].append(Annotation._with_model(key=model.name.name, data=v, module=model.name.prefix, namespace=model.namespace, model=model))
+                res[-1].append(
+                    Annotation._with_model(
+                        key=model.name.name,
+                        data=v,
+                        module=model.name.prefix,
+                        namespace=model.namespace,
+                        model=model,
+                    )
+                )
         return res if is_leaflist else res[0]
 
     def _metadata_to_xml(self, metadata):
@@ -332,14 +373,13 @@ class _AStorage(ABC):
             if operation:
                 attrib[f"""{{{COMMON_NAMESPACES["ncbase"]}}}operation"""] = operation
             subelement(root, walker.current.name, ns_map, txt, attrib, add_ns)
-            replace_field = False
 
 
 class _FieldStorage(_AStorage):
     """Data storage for leaves.
     """
 
-    def __init__(self, model: Model, rd: RequestData, *, value = None):
+    def __init__(self, model: Model, rd: RequestData, *, value=None):
         super().__init__(rd)
         self._model = model
         self._value = value
@@ -350,7 +390,14 @@ class _FieldStorage(_AStorage):
             pass
         elif self._value is GetValuePlaceholder():
             if self._operation:
-                subelement(root, self._walker.current.name, ns_map, attrib={f"""{{{COMMON_NAMESPACES["ncbase"]}}}operation""": self._operation})
+                subelement(
+                    root,
+                    self._walker.current.name,
+                    ns_map,
+                    attrib={
+                        f"""{{{COMMON_NAMESPACES["ncbase"]}}}operation""": self._operation,
+                    },
+                )
             else:
                 subelement(root, self._walker.current.name, ns_map)
         else:
@@ -377,7 +424,11 @@ class _FieldStorage(_AStorage):
         return self._debug_dump_single_metadata(self.metadata)
 
     def debug_dump(self, indent=0):
-        print(f"{' '*(indent+1)*(not self._walker.is_local_key)}{self._model.name} = {self._value}{self._debug_dump_metadata()}", end="\n"*(not self._walker.is_local_key))
+        print(
+            f"{' ' * (indent + 1) * (not self._walker.is_local_key)}"
+            f"{self._model.name} = {self._value}{self._debug_dump_metadata()}",
+            end="\n" * (not self._walker.is_local_key),
+        )
 
     def sanity_check(self):
         name = self._walker.get_type().json_name()
@@ -406,7 +457,11 @@ class _FieldStorage(_AStorage):
         if not self._walker.is_leaflist or isinstance(val, (FieldValuePlaceholder, GetValuePlaceholder, )):
             val = [val]
 
-        if self._walker.is_leaflist and not isinstance(self._value, (FieldValuePlaceholder, GetValuePlaceholder, )) and self.metadata != None:
+        if (
+            self._walker.is_leaflist
+            and not isinstance(self._value, (FieldValuePlaceholder, GetValuePlaceholder, ))
+            and self.metadata is not None
+        ):
             assert not len(self.metadata) or len(self.metadata) == len(self._value)
 
         if self.rd._action == RequestData._Action.convert and name in INTEGRAL_LEAF_TYPE and val and val[0] is not None:
@@ -433,7 +488,12 @@ class _MoStorage(_AStorage):
 
     def _prepare_keys(self, keys):
         w = self._walker
-        return {w.get_child(k).get_name(): _FieldStorage(w.get_child(k).current, self.rd, value=copy.deepcopy(v)) for k, v in keys.items()}
+        return {
+            w.get_child(k).get_name(): _FieldStorage(
+                w.get_child(k).current, self.rd, value=copy.deepcopy(v),
+            )
+            for k, v in keys.items()
+        }
 
     def _to_xml(self, ns_map, root):
         root_attr = {}
@@ -465,7 +525,11 @@ class _MoStorage(_AStorage):
                 continue
             name = k.name if self._walker.has_unique_child(k.name) else k.model_string
             data[name] = v.to_model(key_filter=(key_filter.get(k, {})))
-            if not data[name] and (not isinstance(data[name], Wrapper) or not len(data[name].annotations)) and not self._walker.get_child(name).has_explicit_presence():
+            child_walker = self._walker.get_child(name)
+            if (not data[name]
+                and (not isinstance(data[name], Wrapper) or not len(data[name].annotations))
+                and not child_walker.has_explicit_presence()
+                and child_walker.get_dds() != Model.StatementType.action_):
                 del data[name]
         if self._walker.is_root:
             return data
@@ -474,7 +538,10 @@ class _MoStorage(_AStorage):
         return Container._with_model(data, self._model, annotations=self._metadata_to_model(self.metadata))
 
     def get_keys_flat(self):
-        keys = tuple(self._local_keys[Identifier(self._walker.current.prefix, key)]._value for key in self._model.local_keys)
+        keys = tuple(
+            self._local_keys[Identifier(self._walker.current.prefix, key)]._value
+            for key in self._model.local_keys
+        )
         if len(keys) == 1:
             keys = keys[0]
         return keys
@@ -515,12 +582,12 @@ class _ListStorage(_AStorage):
     """
     def __init__(self, model: Model, rd: RequestData):
         if model.data_def_stm in (Model.StatementType.container_, Model.StatementType.action_):
-            self.__class__ = _MoStorage
-            self.__class__.__init__(self, model, {}, rd)
+            self.__class__ = _MoStorage  # type: ignore[assignment]
+            _MoStorage.__init__(self, model, {}, rd)  # type: ignore[arg-type]
         else:
             super().__init__(rd)
             self._model = model
-            self._entries = {}
+            self._entries: Dict[Tuple[Any, ...], _MoStorage] = {}
             self._operation = ""
 
     def _to_xml(self, ns_map, root):
@@ -549,7 +616,7 @@ class _ListStorage(_AStorage):
         """
         res = self._entries.get(tuple(sorted(keys.items())), None)
         if res is None:
-            raise make_exception(pysros_err_entry_does_not_exists)
+            raise make_exception(err.pysros_err_entry_does_not_exists)
         return res
 
     def get_or_create_entry(self, keys):
@@ -596,7 +663,7 @@ class DictionaryKeysProxy():
     """Proxy for dictionary keys which unwraps keys and compares by performing Identifier.__eq__"""
     def __init__(self, data):
         if not isinstance(data, dict):
-            raise make_exception(pysros_err_invalid_value, data=data)
+            raise make_exception(err.pysros_err_invalid_value, data=data)
         self.data = data
 
     def __getitem__(self, key: Identifier):
@@ -623,8 +690,16 @@ class DictionaryKeysProxy():
 class RdJsonEncoder(json.JSONEncoder):
     def add_ns(self, d, is_root, walker: ModelWalker):
         if is_root:
-            return {k.model_string: (v if not isinstance(v, _FieldStorage) else v._value) for k, v in d.items()}
-        return {k.model_string if walker.get_name().prefix != k.prefix else k.name: (v if not isinstance(v, _FieldStorage) else v._value) for k, v in d.items()}
+            return {
+                k.model_string: (v if not isinstance(v, _FieldStorage) else v._value)
+                for k, v in d.items()
+            }
+        return {
+            (
+                k.model_string if walker.get_name().prefix != k.prefix else k.name
+            ): (v if not isinstance(v, _FieldStorage) else v._value)
+            for k, v in d.items()
+        }
 
     def stringify(self, x, dds):
         return [str(v) for v in x] if dds == Model.StatementType.leaf_list_ else str(x)
@@ -632,14 +707,25 @@ class RdJsonEncoder(json.JSONEncoder):
     def convert(self, o: _FieldStorage):
         if o._value is None:
             return ""
-        return self.stringify(o._value, o._walker.get_dds()) if o._walker.get_type().json_name() in ("int64", "uint64") else o._value
+        return (
+            self.stringify(o._value, o._walker.get_dds())
+            if o._walker.get_type().json_name() in ("int64", "uint64")
+            else o._value
+        )
 
     def convert_child(self, o, k, v):
         if v is None:
             return ""
         if ":" not in k:
             k = Identifier(o._walker.get_name().prefix, k)
-        return self.stringify(v, o._walker.get_child_dds(k)) if o._walker.get_child_dds(k) in FIELD_STATEMENT_TYPES and o._walker.get_child_type(k).json_name() in ("int64", "uint64") else v
+        return (
+            self.stringify(v, o._walker.get_child_dds(k))
+            if (
+                o._walker.get_child_dds(k) in FIELD_STATEMENT_TYPES
+                and o._walker.get_child_type(k).json_name() in ("int64", "uint64")
+            )
+            else v
+        )
 
     def convert_metadata(self, metadata):
         if isinstance(metadata, list):
@@ -649,7 +735,10 @@ class RdJsonEncoder(json.JSONEncoder):
             return list(map(self.convert_metadata, metadata))
         if metadata is None:
             return None
-        return {k: (str(v) if self.metadata_models[k].yang_type.json_name() in ("int64", "uint64") else v) for k, v in metadata.items()}
+        return {
+            k: (str(v) if self.metadata_models[k].yang_type.json_name() in ("int64", "uint64") else v)
+            for k, v in metadata.items()
+        }
 
     def default(self, o):
         is_root = o is self.root
@@ -666,12 +755,24 @@ class RdJsonEncoder(json.JSONEncoder):
                 res.update(self.add_ns(o._local_keys, is_root, o._walker))
                 metadata_sources = itertools.chain(metadata_sources, o._local_keys.items())
             elif is_root and self.force_key:
-                res[o._walker.get_child(self.force_key).get_name().model_string] = o._local_keys[self.force_key]._value
-                metadata_sources = itertools.chain(metadata_sources, ((self.force_key, o._local_keys[self.force_key]), ))
+                res[
+                    o._walker.get_child(self.force_key).get_name().model_string
+                ] = o._local_keys[self.force_key]._value
+                metadata_sources = itertools.chain(
+                    metadata_sources,
+                    ((self.force_key, o._local_keys[self.force_key]), ),
+                )
             res.update(self.add_ns(o._child, is_root, o._walker))
 
-            res = {k.name if isinstance(k, Identifier) else k: self.convert_child(o, k, v) for k, v in res.items()}
-            metadata = {k: self.convert_metadata(v.metadata) for k, v in metadata_sources if isinstance(v, _FieldStorage) and v.has_metadata()}
+            res = {
+                k.name if isinstance(k, Identifier) else k: self.convert_child(o, k, v)
+                for k, v in res.items()
+            }
+            metadata = {
+                k: self.convert_metadata(v.metadata)
+                for k, v in metadata_sources
+                if isinstance(v, _FieldStorage) and v.has_metadata()
+            }
             metadata = self.add_ns(metadata, is_root, o._walker)
             res.update((f"@{k}", v) for k, v in metadata.items())
             if o.metadata and not is_root:
@@ -701,7 +802,7 @@ class _ASetter(ABC):
 
     @property
     def _walker(self):
-        return self.rd._Walker(self._storage._model, self.rd._sros)
+        return self.rd._make_walker(self._storage._model)
 
     @staticmethod
     def create_setter(storage: "_AStorage", rd: RequestData):
@@ -730,12 +831,12 @@ class _ASetter(ABC):
         if not (isinstance(value, Wrapper) and value.annotations):
             return None
 
-        res = []
+        res: List[Dict[str, Any]] = []
         is_leaflist = isinstance(value, LeafList)
         if is_leaflist:
             annotations_list = value.annotations
             if len(annotations_list) > len(value):
-                raise make_exception(pysros_err_too_many_leaflist_annotations)
+                raise make_exception(err.pysros_err_too_many_leaflist_annotations)
             elif len(value) > len(annotations_list):
                 annotations_list = annotations_list + (len(value) - len(annotations_list)) * [None]
         else:
@@ -747,7 +848,7 @@ class _ASetter(ABC):
                 for annotation in annotations:
                     if not isinstance(annotation, Annotation):
                         raise make_exception(
-                            pysros_err_expected_type_but_got_another,
+                            err.pysros_err_expected_type_but_got_another,
                             expected='Annotation',
                             type_name=str(annotation.__class__.__name__)
                         )
@@ -755,12 +856,12 @@ class _ASetter(ABC):
                     name = m.name.model_string
                     if name in res[-1]:
                         raise make_exception(
-                            pysros_err_multiple_occurences_of_annotation
+                            err.pysros_err_multiple_occurences_of_annotation
                         )
                     if not m.yang_type.check_field_value(annotation.data,
                                                          is_convert=self.rd._action == RequestData._Action.convert):
                         raise make_exception(
-                            pysros_err_annotation_incorrect_value, name=name
+                            err.pysros_err_annotation_incorrect_value, name=name
                         )
                     res[-1][name] = m.yang_type.to_value(annotation.data)
         return res if is_leaflist else res[0]
@@ -777,15 +878,18 @@ class _ASetter(ABC):
             for k, v in val.items():
                 m = self._find_metadata_model_by_name(k)
                 name = m.name.model_string
-                if is_json and not m.yang_type.check_field_value(v, json=True,
-                                                                 is_convert=self.rd._action == RequestData._Action.convert):
+                if is_json and not m.yang_type.check_field_value(
+                    v,
+                    json=True,
+                    is_convert=self.rd._action == RequestData._Action.convert,
+                ):
                     raise make_exception(
-                        pysros_err_annotation_incorrect_value,
+                        err.pysros_err_annotation_incorrect_value,
                         name=name
                     )
                 if name in res[-1]:
                     raise make_exception(
-                        pysros_err_multiple_occurences_of_annotation
+                        err.pysros_err_multiple_occurences_of_annotation
                     )
                 res[-1][k] = m.yang_type.to_value(v)
                 if is_xml:
@@ -800,7 +904,7 @@ class _ASetter(ABC):
             if not identity:
                 if isinstance(value_type, IdentityRef):
                     raise make_exception(
-                        pysros_err_incorrect_leaf_value,
+                        err.pysros_err_incorrect_leaf_value,
                         leaf_name=self._walker.current.name.name
                     )
             else:
@@ -808,7 +912,6 @@ class _ASetter(ABC):
                 if is_leaflist:
                     value = [value]
         return value
-
 
     def _find_metadata_model_by_annotation(self, ann: Annotation) -> Model:
         module_name = getattr(ann, "module", None)
@@ -827,18 +930,28 @@ class _ASetter(ABC):
         id = Identifier.from_model_string(name)
         if id.is_lazy_bound():
             candidates = self.rd._modeled_metadata_no_module.get(name)
-            if not candidates:
+            if candidates is None or not candidates:
                 _raise_unknown_attribute(name)
             if len(candidates) > 1:
-                raise make_exception(pysros_err_annotation_not_unique, ann_name = name)
+                raise make_exception(err.pysros_err_annotation_not_unique, ann_name=name)
             return candidates[0]
         candidate = self.rd._modeled_metadata.get(name)
         if not candidate:
             _raise_unknown_attribute(name)
         return candidate
 
-    def _set_metadata(self, *, model_value=None, json_metadata=None, xml_metadata=None, nsmap={}, json_num_of_leaflist_vals=None):
-        assert sum(map(lambda v: v is not None, (model_value, xml_metadata, json_metadata))) <= 1, "You can specify only one format of metadata"
+    def _set_metadata(
+        self,
+        *,
+        model_value=None,
+        json_metadata=None,
+        xml_metadata=None,
+        nsmap={},
+        json_num_of_leaflist_vals=None,
+    ):
+        assert (
+            sum(map(lambda v: v is not None, (model_value, xml_metadata, json_metadata))) <= 1
+        ), "You can specify only one format of metadata"
         if model_value is not None:
             self._storage.metadata = self._metadata_from_model(model_value)
         if xml_metadata is not None:
@@ -854,14 +967,14 @@ class _ASetter(ABC):
             if self._walker.is_leaflist:
                 assert json_num_of_leaflist_vals is not None
                 if len(self._storage.metadata) > json_num_of_leaflist_vals:
-                    raise make_exception(pysros_err_too_many_leaflist_annotations)
+                    raise make_exception(err.pysros_err_too_many_leaflist_annotations)
                 self._storage.metadata = self._storage.metadata[:json_num_of_leaflist_vals]
                 if len(self._storage.metadata) < json_num_of_leaflist_vals:
-                    self._storage.metadata += [{}]*(json_num_of_leaflist_vals-len(self._storage.metadata))
+                    self._storage.metadata += [{}] * (json_num_of_leaflist_vals - len(self._storage.metadata))
 
     def checkJsonDuplicates(x):
         if len(x) != len({i[0] for i in x}):
-            raise make_exception(pysros_err_multiple_occurences_of_node)
+            raise make_exception(err.pysros_err_multiple_occurences_of_node)
         return dict(x)
 
     def set_as_json(self, value):
@@ -869,10 +982,10 @@ class _ASetter(ABC):
         try:
             val = json.loads(value, object_pairs_hook=_ASetter.checkJsonDuplicates)
         except json.JSONDecodeError as e:
-            raise JsonDecodeError(*e.args) from None
+            raise err.JsonDecodeError(*e.args) from None
 
         if not isinstance(val, dict):
-            raise make_exception(pysros_err_wrong_json_root)
+            raise make_exception(err.pysros_err_wrong_json_root)
 
         self._set_as_json(val, is_root=True)
 
@@ -900,7 +1013,7 @@ class _ASetter(ABC):
 
     def delete_annotations(self, annotations_to_delete):
         """Delete specified annotations. If True, delete all annotations."""
-        if annotations_to_delete == True:
+        if annotations_to_delete is True:
             self._storage._metadata = None
             return
         elif isinstance(annotations_to_delete, Annotation):
@@ -909,13 +1022,13 @@ class _ASetter(ABC):
             try:
                 m = self._find_metadata_model_by_annotation(ann)
             except:
-                raise make_exception(pysros_err_annotation_invalid)
+                raise make_exception(err.pysros_err_annotation_invalid)
             if m.name.name == "operation":
-                raise make_exception(pysros_err_annotation_cannot_delete)
+                raise make_exception(err.pysros_err_annotation_cannot_delete)
             elif (self._storage._metadata
                   and m.name.model_string in self._storage._metadata
                   and (ann.data == self._storage._metadata[m.name.model_string] if hasattr(ann, "data") else True)):
-                    self._storage._metadata.pop(m.name.model_string)
+                self._storage._metadata.pop(m.name.model_string)
 
     @abstractmethod
     def replace(self):
@@ -929,7 +1042,7 @@ class _ASetter(ABC):
 
     def entry_get_keys(self):
         """Set list keys as a placeholders"""
-        raise make_exception(pysros_err_target_should_be_list)
+        raise make_exception(err.pysros_err_target_should_be_list)
 
     def to_model(self, *, key_filter={}):
         """Return data in model format.
@@ -946,7 +1059,7 @@ class _ASetter(ABC):
 
     def set_filter(self, value):
         """Populate request data with filter syntax"""
-        raise make_exception(pysros_err_filter_not_supported_on_leaves)
+        raise make_exception(err.pysros_err_filter_not_supported_on_leaves)
 
     def is_compare_supported_endpoint(self):
         return False
@@ -965,9 +1078,16 @@ class _ASetter(ABC):
     def _as_storage_type(self, val, *, child_name=None):
         walker = self._walker.get_child(child_name) if child_name else self._walker
         if walker.get_dds() == Model.StatementType.leaf_list_:
-            return [walker.get_type().as_storage_type(v, self.rd._action == RequestData._Action.convert, self.rd._add_xml_namespace) for v in val]
+            return [
+                walker.get_type().as_storage_type(
+                    v, self.rd._action == RequestData._Action.convert, self.rd._add_xml_namespace,
+                )
+                for v in val
+            ]
         else:
-            return walker.get_type().as_storage_type(val, self.rd._action == RequestData._Action.convert, self.rd._add_xml_namespace)
+            return walker.get_type().as_storage_type(
+                val, self.rd._action == RequestData._Action.convert, self.rd._add_xml_namespace,
+            )
 
     def _handle_entry_keys_namespaces(self, entry):
         """Strip namespace prefixes from entry key names and raise an error if there
@@ -977,7 +1097,7 @@ class _ASetter(ABC):
         for k in local_keys:
             if k.model_string in entry:
                 if k.name in entry:
-                    raise make_exception(pysros_err_malformed_keys, full_path=self._walker, value=entry[k.model_string])
+                    raise make_exception(err.pysros_err_malformed_keys, full_path=self._walker, value=entry[k.model_string])
                 entry[k.name] = entry.pop(k.model_string)
 
 
@@ -997,7 +1117,7 @@ class _LeafSetter(_ASetter):
         if not self._walker.check_field_value(value, is_convert=self.rd._action == RequestData._Action.convert,
                                               metadata=self._storage.metadata):
             raise make_exception(
-                pysros_err_incorrect_leaf_value,
+                err.pysros_err_incorrect_leaf_value,
                 leaf_name=self._walker.get_name().name
             )
         else:
@@ -1012,25 +1132,25 @@ class _LeafSetter(_ASetter):
 
     def set_as_xml(self, value):
         if not len(value):
-            raise make_exception(pysros_err_malformed_xml)
+            raise make_exception(err.pysros_err_malformed_xml)
         for v in value:
             self.set_or_append_as_xml(v)
 
     def _set_as_json(self, value, is_root=False):
         if not isinstance(value, dict) or not all(isinstance(k, str) for k in value):
-            raise make_exception(pysros_err_invalid_json_structure)
+            raise make_exception(err.pysros_err_invalid_json_structure)
         metadata = {k: v for k, v in value.items() if k.startswith("@")}
         value = {k: v for k, v in value.items() if not k.startswith("@")}
         if len(value) != 1 or len(metadata) > 1:
-            raise make_exception(pysros_err_invalid_json_structure)
+            raise make_exception(err.pysros_err_invalid_json_structure)
 
         val = next(iter(value.items()))
         if metadata:
             metadata = next(iter(metadata.items()))
             if "@" + val[0] != metadata[0]:
-                raise make_exception(pysros_err_invalid_json_structure)
+                raise make_exception(err.pysros_err_invalid_json_structure)
         if self._walker.get_name() != val[0]:
-            raise make_exception(pysros_err_invalid_json_structure)
+            raise make_exception(err.pysros_err_invalid_json_structure)
         val = val[1]
         if self._walker.get_type().json_name() in ("int64", "uint64") and val != "":
             if self._walker.get_dds() != Model.StatementType.leaf_list_:
@@ -1038,11 +1158,11 @@ class _LeafSetter(_ASetter):
             else:
                 val = self.rd._unwrap(val)
             if not isinstance(val, list) or not all(isinstance(v, str) for v in val):
-                raise make_exception(pysros_err_incorrect_leaf_value, leaf_name=self._walker.get_name().name)
+                raise make_exception(err.pysros_err_incorrect_leaf_value, leaf_name=self._walker.get_name().name)
             try:
                 value = [int(self.rd._unwrap(v)) for v in val]
             except:
-                raise make_exception(pysros_err_incorrect_leaf_value, leaf_name=self._walker.get_name().name) from None
+                raise make_exception(err.pysros_err_incorrect_leaf_value, leaf_name=self._walker.get_name().name) from None
         self.set(self._walker.as_model_type(val))
         if metadata:
             if self._walker.is_leaflist:
@@ -1053,16 +1173,24 @@ class _LeafSetter(_ASetter):
     def set_or_append_as_xml(self, value_element):
         if _get_tag_name(value_element) != self._walker.get_name().name:
             raise make_exception(
-                pysros_err_unknown_child,
+                err.pysros_err_unknown_child,
                 child_name=_get_tag_name(value_element),
                 path=self._walker._get_path()
             )
         is_leaflist = self._walker.get_dds() == Model.StatementType.leaf_list_
-        self._set_metadata(xml_metadata=_metadata_from_xml(value_element, self.rd._ns_map_rev), nsmap=value_element.nsmap)
-        if _text_in_tag_tail(value_element) or (is_leaflist and _text_in_tag_text(value_element.getparent())):
+        self._set_metadata(
+            xml_metadata=_metadata_from_xml(value_element, self.rd._ns_map_rev),
+            nsmap=value_element.nsmap,
+        )
+        if (
+            _text_in_tag_tail(value_element)
+            or (is_leaflist and _text_in_tag_text(value_element.getparent()))
+        ):
             _raise_invalid_text_exception(value_element)
         value = self._walker.as_model_type(value_element.text)
-        value = self._fix_xml_identityref_prefix(value, self._walker.get_type(), is_leaflist=is_leaflist, nsmap=value_element.nsmap)
+        value = self._fix_xml_identityref_prefix(
+            value, self._walker.get_type(), is_leaflist=is_leaflist, nsmap=value_element.nsmap,
+        )
 
         if is_leaflist and isinstance(self._storage._value, list):
             value = self._storage._value + value
@@ -1085,6 +1213,7 @@ class _LeafSetter(_ASetter):
     def merge(self):
         self._storage._operation = "merge"
 
+
 class _KeySetter(_ASetter):
 
     """Interface for keys. Most of this class are stub methods to provide
@@ -1098,9 +1227,9 @@ class _KeySetter(_ASetter):
         value = self.rd._unwrap(value)
         if not self._walker.check_field_value(value, is_convert=self.rd._action == RequestData._Action.convert,
                                               metadata=self._storage.metadata):
-            raise make_exception(pysros_err_incorrect_leaf_value, leaf_name=self._walker.get_name().name)
+            raise make_exception(err.pysros_err_incorrect_leaf_value, leaf_name=self._walker.get_name().name)
         elif self._as_storage_type(value) != self._storage._value:
-            raise make_exception(pysros_err_key_val_mismatch, key_name=self._walker.get_name().name)
+            raise make_exception(err.pysros_err_key_val_mismatch, key_name=self._walker.get_name().name)
 
     def set_getValue(self):
         pass
@@ -1117,10 +1246,10 @@ class _KeySetter(_ASetter):
         return root
 
     def delete(self):
-        raise make_exception(pysros_err_invalid_operation_on_key)
+        raise make_exception(err.pysros_err_invalid_operation_on_key)
 
     def replace(self):
-        raise make_exception(pysros_err_invalid_operation_on_key)
+        raise make_exception(err.pysros_err_invalid_operation_on_key)
 
     def merge(self):
         pass
@@ -1129,13 +1258,13 @@ class _KeySetter(_ASetter):
         if _text_in_tag_tail(value):
             _raise_invalid_text_exception(value)
         if not len(value):
-            raise make_exception(pysros_err_malformed_xml)
+            raise make_exception(err.pysros_err_malformed_xml)
         for v in value:
             if _text_in_tag_tail(v):
                 _raise_invalid_text_exception(v)
             if _get_tag_name(v) != self._walker.get_name().name:
                 raise make_exception(
-                    pysros_err_unknown_child,
+                    err.pysros_err_unknown_child,
                     child_name=_get_tag_name(v),
                     path=self._walker._get_path()
                 )
@@ -1144,27 +1273,27 @@ class _KeySetter(_ASetter):
 
     def _set_as_json(self, value, is_root=False):
         if not isinstance(value, dict):
-            raise make_exception(pysros_err_invalid_json_structure)
+            raise make_exception(err.pysros_err_invalid_json_structure)
         metadata = {k: v for k, v in value.items() if k.startswith("@")}
         value = {k: v for k, v in value.items() if not k.startswith("@")}
         if len(value) != 1 or len(metadata) > 1:
-            raise make_exception(pysros_err_invalid_json_structure)
+            raise make_exception(err.pysros_err_invalid_json_structure)
 
         val = next(iter(value.items()))
         if metadata:
             metadata = next(iter(metadata.items()))
             if "@" + val[0] != metadata[0]:
-                raise make_exception(pysros_err_invalid_json_structure)
+                raise make_exception(err.pysros_err_invalid_json_structure)
 
         if self._walker.get_name() != val[0]:
-            raise make_exception(pysros_err_invalid_json_structure)
+            raise make_exception(err.pysros_err_invalid_json_structure)
         if self._walker.get_type().json_name() in ("int64", "uint64"):
             if not isinstance(val[1], str):
-                raise make_exception(pysros_err_incorrect_leaf_value, leaf_name=self._walker.get_name().name)
+                raise make_exception(err.pysros_err_incorrect_leaf_value, leaf_name=self._walker.get_name().name)
             try:
                 value = int(val[1])
             except:
-                raise make_exception(pysros_err_incorrect_leaf_value, leaf_name=self._walker.get_name().name) from None
+                raise make_exception(err.pysros_err_incorrect_leaf_value, leaf_name=self._walker.get_name().name) from None
         self.set(self._walker.as_model_type(val[1]))
         if metadata:
             self._set_metadata(json_metadata=metadata[1])
@@ -1197,7 +1326,7 @@ class _ListSetter(_ASetter):
             self._handle_entry_keys_namespaces(value)
             self.entry(value).set(value, wrapped=wrapped)
         else:
-            raise make_exception(pysros_err_malformed_keys, full_path=self._walker, value=value)
+            raise make_exception(err.pysros_err_malformed_keys, full_path=self._walker, value=value)
 
     def set_filter(self, value):
         value = copy.copy(value)
@@ -1226,22 +1355,34 @@ class _ListSetter(_ASetter):
         try:
             def unwrap(v):
                 return v.data if isinstance(v, Wrapper) else v
-            val = {self._walker.get_child(k).get_name(): (GetValuePlaceholder() if unwrap(v) in (GetValuePlaceholder(), {}) else self._walker.as_child_model_type(k, unwrap(v))) for k, v in entry.items() if v is not FieldValuePlaceholder()}
+            val = {
+                self._walker.get_child(k).get_name(): (
+                    GetValuePlaceholder()
+                    if unwrap(v) in (GetValuePlaceholder(), {})
+                    else self._walker.as_child_model_type(k, unwrap(v))
+                )
+                for k, v in entry.items()
+                if v is not FieldValuePlaceholder()
+            }
             return val
         except:
-            raise make_exception(pysros_err_invalid_key_in_path) from None
+            raise make_exception(err.pysros_err_invalid_key_in_path) from None
 
     def _check_and_unwrap_keys(self, entry, *, json=False):
         for k in self._walker.get_local_key_names():
             if k not in entry:
                 raise make_exception(
-                    pysros_err_malformed_keys,
+                    err.pysros_err_malformed_keys,
                     full_path=self._walker, value=k
                 )
             entry[k] = self.rd._unwrap(entry[k])
             if not self._walker.check_child_field_value(k, entry[k], json=json, strict=True):
-                raise make_exception(pysros_err_incorrect_leaf_value, leaf_name=k)
-            entry[k] = self._walker.get_child_type(k).as_storage_type(entry[k], self.rd._action == RequestData._Action.convert, self.rd._add_xml_namespace)
+                raise make_exception(err.pysros_err_incorrect_leaf_value, leaf_name=k)
+            entry[k] = self._walker.get_child_type(k).as_storage_type(
+                entry[k],
+                self.rd._action == RequestData._Action.convert,
+                self.rd._add_xml_namespace,
+            )
 
     def entry(self, value, *, json=False):
         """Receive entry with specified keys in value. Keys are expected as dict(name->value). Additional
@@ -1264,7 +1405,7 @@ class _ListSetter(_ASetter):
         self._check_and_unwrap_keys(value, json=json)
         keys = self._extract_keys(value)
         if self._storage.has_entry(keys):
-            raise make_exception(pysros_err_multiple_occurences_of_entry)
+            raise make_exception(err.pysros_err_multiple_occurences_of_entry)
         return _MoSetter(self._storage.get_or_create_entry(keys), self.rd)
 
     def entry_nocheck(self, value):
@@ -1274,7 +1415,12 @@ class _ListSetter(_ASetter):
         .. Reviewed by PLM 20211018
         """
 
-        return _MoSetter(self._storage.get_or_create_entry(self._convert_keys_to_model(self._extract_keys(value))), self.rd)
+        return _MoSetter(
+            self._storage.get_or_create_entry(
+                self._convert_keys_to_model(self._extract_keys(value)),
+            ),
+            self.rd,
+        )
 
     def entry_exists_nocheck(self, value):
         """Receive entry with specified keys in value without checking for the correct type. Keys are expected
@@ -1291,14 +1437,20 @@ class _ListSetter(_ASetter):
                 if _text_in_tag_tail(e):
                     _raise_invalid_text_exception(e)
                 keys[name] = e.text or ""
-                keys[name] = self._fix_xml_identityref_prefix(keys[name], self._walker.get_child_type(Identifier(self.rd._ns_map_rev[self._walker.current.namespace], name)), nsmap=e.nsmap)
+                keys[name] = self._fix_xml_identityref_prefix(
+                    keys[name],
+                    self._walker.get_child_type(
+                        Identifier(self.rd._ns_map_rev[self._walker.current.namespace], name),
+                    ),
+                    nsmap=e.nsmap,
+                )
         if set(keys.keys()) != set(self._walker.get_local_key_names()):
             raise make_exception(
-                pysros_err_malformed_keys,
+                err.pysros_err_malformed_keys,
                 full_path=self._walker, value=keys
             )
         if self.entry_exists_nocheck(keys):
-            raise make_exception(pysros_err_multiple_occurences_of_entry)
+            raise make_exception(err.pysros_err_multiple_occurences_of_entry)
         return self.entry_nocheck(keys)
 
     def set_as_xml(self, value):
@@ -1308,22 +1460,22 @@ class _ListSetter(_ASetter):
     def _set_as_json(self, value, is_root=False):
         if is_root:
             if not isinstance(value, dict):
-                raise make_exception(pysros_err_invalid_json_structure)
+                raise make_exception(err.pysros_err_invalid_json_structure)
             value = {k: v for k, v in value.items() if not k.startswith("@")}
             if len(value) != 1:
-                raise make_exception(pysros_err_invalid_json_structure)
+                raise make_exception(err.pysros_err_invalid_json_structure)
             value = next(iter(value.items()))
             if self._walker.get_name() != value[0] or not isinstance(value[1], list):
-                raise make_exception(pysros_err_invalid_json_structure)
+                raise make_exception(err.pysros_err_invalid_json_structure)
             value = value[1]
         else:
             if not isinstance(value, list) or not all(isinstance(i, dict) for i in value):
-                raise make_exception(pysros_err_convert_invalid_value_for_type, name=self._walker.get_name().name)
+                raise make_exception(err.pysros_err_convert_invalid_value_for_type, name=self._walker.get_name().name)
         for v in value:
             self.add_entry(v, json=True)._set_as_json(v)
 
     def delete(self):
-        raise make_exception(pysros_err_invalid_path_operation_missing_keys)
+        raise make_exception(err.pysros_err_invalid_path_operation_missing_keys)
 
     def replace(self):
         for k, v in self._storage._entries.items():
@@ -1348,13 +1500,18 @@ class _MoSetter(_ASetter):
 
     .. Reviewed by TechComms 20210712
     """
+    _storage: _MoStorage
+
+    def __init__(self, storage: _MoStorage, rd: RequestData):
+        super().__init__(storage, rd)
+
     class _AChild:
         def __init__(self, setter: "_MoSetter"):
             self._setter = setter
 
         @property
         def _walker(self):
-            return self._setter.rd._Walker(self._setter._storage._model, self._setter.rd._sros)
+            return self._setter.rd._make_walker(self._setter._storage._model)
 
     class _Keys(_AChild):
         """Interface for retrieving and setting keys.
@@ -1362,28 +1519,36 @@ class _MoSetter(_ASetter):
         .. Reviewed by TechComms 20210712
         """
 
-        def set(self, name :str, value):
+        def set(self, name: str, value):
             name = self._walker.get_child(name).get_name()
             self.get(name).set(value)
 
-        def set_as_json(self, name :Identifier, value):
+        def set_as_json(self, name: Identifier, value):
             self.get(name)._set_as_json({name.name: value})
 
         def set_getValue(self, name: Union[str, Identifier]):
             name = self._walker.get_child(name).get_name()
             if not self.contains(name):
-                self._setter._storage._local_keys[name] = _FieldStorage(self._setter._walker.get_child(name).current, self._setter.rd, value=FieldValuePlaceholder())
+                self._setter._storage._local_keys[name] = _FieldStorage(
+                    self._setter._walker.get_child(name).current,
+                    self._setter.rd,
+                    value=FieldValuePlaceholder(),
+                )
             self.get(name).set_getValue()
 
         def set_placeholder(self, name: str):
             name = self._walker.get_child(name).get_name()
             if not self.contains(name):
-                self._setter._storage._local_keys[name] = _FieldStorage(self._setter._walker.get_child(name).current, self._setter.rd, value=FieldValuePlaceholder())
+                self._setter._storage._local_keys[name] = _FieldStorage(
+                    self._setter._walker.get_child(name).current,
+                    self._setter.rd,
+                    value=FieldValuePlaceholder(),
+                )
             self.get(name).set_placeholder()
 
         def get(self, name: Union[str, Identifier]):
             if not self.can_contains(name):
-                raise make_exception(pysros_err_unknown_child, child_name=name, path=self._walker._get_path())
+                raise make_exception(err.pysros_err_unknown_child, child_name=name, path=self._walker._get_path())
             name = self._walker.get_child(name).get_name()
             return _KeySetter(self._setter._storage, name, self._setter.rd)
 
@@ -1403,7 +1568,7 @@ class _MoSetter(_ASetter):
             name = self._walker.get_child(name).get_name()
             self.get(name).set(value)
 
-        def set_as_json(self, name :Identifier, value):
+        def set_as_json(self, name: Identifier, value):
             self.get(name)._set_as_json({name.name: value})
 
         def get_as_json(self, name):
@@ -1417,20 +1582,26 @@ class _MoSetter(_ASetter):
         def get(self, name: Union[str, Identifier]):
             name = self._walker.get_child(name).get_name()
             if not self.can_contains(name):
-                raise make_exception(pysros_err_unknown_child, child_name=name, path=self._walker._get_path())
+                raise make_exception(err.pysros_err_unknown_child, child_name=name, path=self._walker._get_path())
             name = self._walker.get_child(name).get_name()
             if not self.contains(name):
-                self._setter._storage._child[name] = _FieldStorage(self._setter._walker.get_child(name).current, self._setter.rd)
-            return _LeafSetter(self._setter._storage._child[name], self._setter.rd)
+                self._setter._storage._child[name] = _FieldStorage(
+                    self._setter._walker.get_child(name).current,
+                    self._setter.rd,
+                )
+            return _LeafSetter(cast(_FieldStorage, self._setter._storage._child[name]), self._setter.rd)
 
         def get_nonexisting(self, name: Identifier):
             if not self.can_contains(name):
-                raise make_exception(pysros_err_unknown_child, child_name=name, path=self._walker._get_path())
+                raise make_exception(err.pysros_err_unknown_child, child_name=name, path=self._walker._get_path())
             if self.contains(name) and self._walker.get_child_dds(name) != Model.StatementType.leaf_list_:
-                raise make_exception(pysros_err_multiple_occurences_of_node)
+                raise make_exception(err.pysros_err_multiple_occurences_of_node)
             if not self.contains(name):
-                self._setter._storage._child[name] = _FieldStorage(self._setter._walker.get_child(name).current, self._setter.rd)
-            return _LeafSetter(self._setter._storage._child[name], self._setter.rd)
+                self._setter._storage._child[name] = _FieldStorage(
+                    self._setter._walker.get_child(name).current,
+                    self._setter.rd,
+                )
+            return _LeafSetter(cast(_FieldStorage, self._setter._storage._child[name]), self._setter.rd)
 
         def contains(self, name: Identifier):
             return name in self._setter._storage._child
@@ -1454,7 +1625,10 @@ class _MoSetter(_ASetter):
             name = self._walker.get_child(name).get_name()
             if self._walker.get_child_dds(name) in MO_STATEMENT_TYPES:
                 if not self.is_created(name):
-                    self._setter._storage._child[name] = _ListStorage(self._setter._walker.get_child(name).current, self._setter.rd)
+                    self._setter._storage._child[name] = _ListStorage(
+                        self._setter._walker.get_child(name).current,
+                        self._setter.rd,
+                    )
                 return _ASetter.create_setter(self._setter._storage._child[name], self._setter.rd)
             else:
                 raise KeyError(name)
@@ -1464,9 +1638,12 @@ class _MoSetter(_ASetter):
             if self._walker.get_child_dds(name) in MO_STATEMENT_TYPES:
                 if self.is_created(name):
                     if not self._walker.get_child_dds(name) == Model.StatementType.list_:
-                        raise make_exception(pysros_err_multiple_occurences_of_annotation)
+                        raise make_exception(err.pysros_err_multiple_occurences_of_annotation)
                 else:
-                    self._setter._storage._child[name] = _ListStorage(self._setter._walker.get_child(name).current, self._setter.rd)
+                    self._setter._storage._child[name] = _ListStorage(
+                        self._setter._walker.get_child(name).current,
+                        self._setter.rd,
+                    )
                 return _ASetter.create_setter(
                     self._setter._storage._child[name], self._setter.rd
                 )
@@ -1495,7 +1672,7 @@ class _MoSetter(_ASetter):
         self._set_metadata(model_value=(wrapped if wrapped is not None else value))
         value = self.rd._unwrap(value)
         if not isinstance(value, dict):
-            raise make_exception(pysros_err_invalid_value, data=value)
+            raise make_exception(err.pysros_err_invalid_value, data=value)
         children_to_set = set()
         walker = self._walker
         for k, v in value.items():
@@ -1507,13 +1684,13 @@ class _MoSetter(_ASetter):
                 self.child_mos.set(k, v)
             else:
                 raise make_exception(
-                    pysros_err_unknown_dds,
+                    err.pysros_err_unknown_dds,
                     dds=walker.get_child_dds(k)
                 )
             name = self._walker.get_child(k).get_name()
             if name in children_to_set:
                 raise make_exception(
-                    pysros_err_duplicate_found,
+                    err.pysros_err_duplicate_found,
                     duplicate=name.name
                 )
             children_to_set.add(name)
@@ -1521,7 +1698,7 @@ class _MoSetter(_ASetter):
     def set_filter(self, value):
         value = self.rd._unwrap(value)
         if not isinstance(value, dict):
-            raise make_exception(pysros_err_invalid_value, data=value)
+            raise make_exception(err.pysros_err_invalid_value, data=value)
         self._handle_entry_keys_namespaces(value)
         children_to_set = set()
         for k, v in value.items():
@@ -1542,13 +1719,13 @@ class _MoSetter(_ASetter):
                 self.child_mos.get_or_create(k).set_filter(v)
             else:
                 raise make_exception(
-                    pysros_err_unknown_dds,
+                    err.pysros_err_unknown_dds,
                     dds=self._walker.get_child_dds(k)
                 )
             name = Identifier.from_model_string(k).name
             if name in children_to_set:
                 raise make_exception(
-                    pysros_err_duplicate_found,
+                    err.pysros_err_duplicate_found,
                     duplicate=name
                 )
             children_to_set.add(name)
@@ -1567,13 +1744,13 @@ class _MoSetter(_ASetter):
                 if self._walker.has_unique_child(_get_tag_name(e)):
                     name = self._walker.get_child(_get_tag_name(e)).get_name()
                 elif self._walker.current.name.is_builtin():
-                    raise make_exception(pysros_err_unknown_child, child_name=_get_tag_name(e), path=walker._get_path())
+                    raise make_exception(err.pysros_err_unknown_child, child_name=_get_tag_name(e), path=walker._get_path())
                 else:
                     name = Identifier(self.rd._ns_map_rev[self._walker.current.namespace], _get_tag_name(e))
             else:
                 name = Identifier(_get_tag_prefix(e, self.rd._ns_map_rev), _get_tag_name(e))
             if not walker.has_child(name):
-                raise make_exception(pysros_err_unknown_child, child_name=_get_tag_name(e), path=walker._get_path())
+                raise make_exception(err.pysros_err_unknown_child, child_name=_get_tag_name(e), path=walker._get_path())
             if walker.is_region_blocked_in_child(name):
                 continue
             else:
@@ -1581,14 +1758,18 @@ class _MoSetter(_ASetter):
                     if _get_tag_name(e) not in walker.get_local_key_names():
                         self.fields.get_nonexisting(name).set_or_append_as_xml(e)
                     elif self.rd._action == RequestData._Action.convert:
-                        xml = to_ele(f"<{_get_tag_name(value)}>{etree.tostring(e, encoding='unicode')}</{_get_tag_name(value)}>")
+                        xml = to_ele(
+                            f"<{_get_tag_name(value)}>"
+                            f"{etree.tostring(e, encoding='unicode')}"
+                            f"</{_get_tag_name(value)}>"
+                        )
                         _KeySetter(self._storage, name, self.rd).set_as_xml(xml)
                 elif walker.get_child_dds(name) in MO_STATEMENT_TYPES:
                     self.child_mos.get(name).entry_xml(e).set_as_xml(e)
 
     def _set_as_json(self, value, is_root=False):
         if not isinstance(value, dict):
-            raise make_exception(pysros_err_invalid_json_structure)
+            raise make_exception(err.pysros_err_invalid_json_structure)
 
         children_to_set = set()
         already_set = set()
@@ -1596,7 +1777,7 @@ class _MoSetter(_ASetter):
         def check_duplicates(name):
             if name in children_to_set:
                 raise make_exception(
-                    pysros_err_duplicate_found,
+                    err.pysros_err_duplicate_found,
                     duplicate=name
                 )
             children_to_set.add(name)
@@ -1609,7 +1790,7 @@ class _MoSetter(_ASetter):
                 k = k[1:]
                 try:
                     name = self._walker.get_child(k).get_name()
-                except SrosMgmtError as e:
+                except err.SrosMgmtError as e:
                     try:
                         if ":" not in k:
                             name = self._walker.get_child(Identifier(self._walker.get_name().prefix, k)).get_name()
@@ -1624,12 +1805,12 @@ class _MoSetter(_ASetter):
 
                 if not self.fields.can_contains(name):
                     raise make_exception(
-                        pysros_err_unknown_field,
+                        err.pysros_err_unknown_field,
                         field_name=name.name, path=self._walker._get_path()
                     )
                 if k not in value:
                     raise make_exception(
-                        pysros_err_annotation_without_value,
+                        err.pysros_err_annotation_without_value,
                         child_name=name.name, path=self._walker._get_path()
                     )
                 self.fields.get(name)._set_as_json({k: value[k], f"@{k}": v})
@@ -1638,7 +1819,7 @@ class _MoSetter(_ASetter):
                 continue
             try:
                 name = self._walker.get_child(k).get_name()
-            except SrosMgmtError as e:
+            except err.SrosMgmtError as e:
                 try:
                     if ":" not in k:
                         name = self._walker.get_child(Identifier(self._walker.get_name().prefix, k)).get_name()
@@ -1658,7 +1839,7 @@ class _MoSetter(_ASetter):
                 self.child_mos.set_as_json(name, v)
             else:
                 raise make_exception(
-                    pysros_err_unknown_dds,
+                    err.pysros_err_unknown_dds,
                     dds=self._walker.get_child_dds(name)
                 )
             check_duplicates(name)

@@ -3,7 +3,7 @@
 import re
 import functools
 
-from .errors import *
+from . import errors as err
 from .errors import make_exception
 from .singleton import _Singleton
 
@@ -72,11 +72,11 @@ class Identifier:
         if ":" not in s:
             return Identifier(default_module, s)
         if s.count(":") != 1:
-            raise make_exception(pysros_err_can_have_one_semicolon)
+            raise make_exception(err.pysros_err_can_have_one_semicolon)
         prefix, name = s.split(":")
         if prefix not in prefix_module_mapping:
             raise make_exception(
-                pysros_err_unknown_prefix_for_name,
+                err.pysros_err_unknown_prefix_for_name,
                 prefix=prefix,
                 name=name
             )
@@ -87,7 +87,7 @@ class Identifier:
         if ":" not in s:
             return Identifier.lazy_bound(s)
         if s.count(":") != 1:
-            raise make_exception(pysros_err_can_have_one_semicolon)
+            raise make_exception(err.pysros_err_can_have_one_semicolon)
         return Identifier(*s.split(":"))
 
     def __hash__(self):
@@ -105,8 +105,11 @@ class Identifier:
 
     def __eq__(self, other):
         if type(other) is Identifier:
-            return self._name == other._name and (self._prefix == other._prefix or Wildcard() in (self._prefix, other._prefix, ))
-        elif type(other) == str:
+            return self._name == other._name and (
+                self._prefix == other._prefix
+                or Wildcard() in (self._prefix, other._prefix, )
+            )
+        elif isinstance(other, str):
             if ":" in other:
                 return self == Identifier.from_model_string(other)
             return self.name == other

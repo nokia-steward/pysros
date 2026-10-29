@@ -3,12 +3,11 @@
 import copy
 import locale
 import sys
-import functools
 from decimal import Decimal
 from enum import Enum, IntEnum, IntFlag
-from typing import List, Optional, Union
+from typing import Any, List, Optional, Sequence, Tuple, Union
 
-from .errors import *
+from . import errors as err
 from .errors import make_exception
 from .identifier import Identifier
 from .model_defines import TAGS_WITH_IMPLICIT_CASE
@@ -51,6 +50,7 @@ class YangVersion:
     def __repr__(self):
         return f"YangVersion('{self._val}')"
 
+
 YangVersion.ver1_0 = YangVersion("1.0")
 YangVersion.ver1_1 = YangVersion("1.1")
 
@@ -88,7 +88,7 @@ class AModel:
     __slots__ = ()
 
     name: Identifier
-    children: "List[AModel]"
+    children: Sequence["AModel"]
     yang_type: Optional[YangType]
     units: Optional[str]
     namespace: Optional[str]
@@ -102,7 +102,12 @@ class AModel:
     parent: "AModel"
     config: bool
 
-    DDS_WITH_IMPLICIT_CASE = tuple(map(StatementType.__getitem__, map(lambda s: s.replace("-", "_")+"_", TAGS_WITH_IMPLICIT_CASE)))
+    DDS_WITH_IMPLICIT_CASE = tuple(
+        map(
+            StatementType.__getitem__,
+            map(lambda s: s.replace("-", "_") + "_", TAGS_WITH_IMPLICIT_CASE),
+        )
+    )
 
     def recursive_walk(self, cb):
         cont = cb(self)
@@ -117,8 +122,8 @@ class AModel:
     def __repr__(self):
         return f"""Model("{str(self.name)}")"""
 
-    def __deepcopy__(self, memo):
-        raise make_exception(pysros_err_use_deepcopy)
+    def __deepcopy__(self, _memo):
+        raise make_exception(err.pysros_err_use_deepcopy)
 
     def debug_print(self, prefix="", last=False, with_blueprints=False):
         class Colors:
@@ -278,8 +283,8 @@ class BuildingModel(AModel):
     )
 
     def __init__(self, name: Union[Identifier, str], data_def_stm: AModel.StatementType, parent, yang_version):
-        self.name = Identifier.builtin(name) if type(name) == str else name
-        self.children: List[Model] = []
+        self.name = Identifier.builtin(name) if isinstance(name, str) else name
+        self.children: Sequence[BuildingModel] = []
         self.yang_type: Optional[YangType] = None
         self.units: Optional[str] = None
         self.namespace: Optional[str] = None
@@ -292,9 +297,11 @@ class BuildingModel(AModel):
         self.data_def_stm = data_def_stm
         self.target_path = None
         self.parent = parent
-        self.identity_bases = None if data_def_stm != AModel.StatementType.identity_ else []
+        self.identity_bases: Optional[List[Identifier]] = (
+            None if data_def_stm != AModel.StatementType.identity_ else []
+        )
         self.config: bool = True
-        self.blueprint = []
+        self.blueprint: List[Tuple[bool, Any]] = []
         self.arg = None
         self.nsmap = None
         self.yang_version = yang_version
@@ -339,7 +346,7 @@ class BuildingModel(AModel):
                 return
             else:
                 raise make_exception(
-                    pysros_err_cannot_remove_node,
+                    err.pysros_err_cannot_remove_node,
                     node=self.name
                 )
         del self.parent.children[idx]
@@ -385,7 +392,7 @@ class StorageModel(AModel):
         status = 1 << 12
 
     class DataMembers(IntEnum):
-        name = 0
+        name = 0  # type: ignore[assignment]
         children = 1
         yang_type = 2
         local_keys = 3
@@ -516,6 +523,11 @@ class Model(StorageModel):
         return self._data[Model.DataMembers.local_keys]
 
     @property
+    def is_local_key(self):
+        parent = self.parent
+        return parent is not None and self.name.name in parent.local_keys
+
+    @property
     def target_path(self):
         return self._data[Model.DataMembers.target_path]
 
@@ -538,8 +550,8 @@ class Model(StorageModel):
     def __repr__(self):
         return f"""Model("{str(self.name)}")"""
 
-    def __deepcopy__(self, memo):
-        raise make_exception(pysros_err_use_deepcopy)
+    def __deepcopy__(self, _memo):
+        raise make_exception(err.pysros_err_use_deepcopy)
 
     def __eq__(self, other):
         return self._data is other._data
@@ -764,8 +776,8 @@ class StorageConstructionModel(StorageModel):
             child.deepcopy(result)
         return result
 
-    def __deepcopy__(self, memo):
-        raise make_exception(pysros_err_use_deepcopy)
+    def __deepcopy__(self, _memo):
+        raise make_exception(err.pysros_err_use_deepcopy)
 
     def __eq__(self, other):
         return self._data is other._data
@@ -773,7 +785,7 @@ class StorageConstructionModel(StorageModel):
 
 def new_Model_data(name: Identifier, data_def_stm: Model.StatementType, parent):
     return (parent._storage if parent is not None else []), [
-        [None, name] if type(name) == str else [name.prefix, name.name],        # 0 = name
+        [None, name] if isinstance(name, str) else [name.prefix, name.name],        # 0 = name
         [],                                                                     # 1 = children
         None,                                                                   # 2 = yang_type
         [],                                                                     # 3 = local_keys
