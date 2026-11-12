@@ -4,14 +4,14 @@ import contextlib
 import copy
 import json
 from enum import Enum, auto
-from typing import List, Optional, Union
+from typing import Any, ClassVar, Dict, List, Optional, Tuple, Union
 
-from .errors import *
-from .errors import InvalidPathError, SrosMgmtError, make_exception
+from . import errors as err
+from .errors import make_exception
 from .identifier import Identifier
 from .model import Model, AModel
+from .model_path import ModelPath
 from .wrappers import Container, Leaf, LeafList
-from .yang_type import *
 
 
 class Token:
@@ -25,7 +25,7 @@ class ModelWalker:
 
     .. Reviewed by TechComms 20210712
     """
-    _expected_dds = (
+    _expected_dds: ClassVar[Tuple[Model.StatementType, ...]] = (
         Model.StatementType.container_, Model.StatementType.list_,
         Model.StatementType.leaf_, Model.StatementType.leaf_list_,
         Model.StatementType.augment_, Model.StatementType.notification_,
@@ -33,7 +33,7 @@ class ModelWalker:
         Model.StatementType.output_, Model.StatementType.choice_,
         Model.StatementType.case_, Model.StatementType.action_,
     )
-    _recursive_visited_dds = (
+    _recursive_visited_dds: ClassVar[Tuple[Model.StatementType, ...]] = (
         Model.StatementType.module_, Model.StatementType.submodule_,
         Model.StatementType.uses_, Model.StatementType.grouping_,
         Model.StatementType.augment_,
@@ -41,7 +41,7 @@ class ModelWalker:
 
     def __init__(self, model: Model, sros: bool):
         self.path: List[Model] = []
-        self.keys = []
+        self.keys: List[Dict[Any, Any]] = []
         while model.parent is not None:
             if model.data_def_stm in self._expected_dds or not self.path:
                 self.path.insert(0, model)
@@ -68,7 +68,7 @@ class ModelWalker:
 
     def go_to_parent(self):
         if not self.path:
-            raise make_exception(pysros_err_cannot_call_go_to_parent)
+            raise make_exception(err.pysros_err_cannot_call_go_to_parent)
 
         self.path.pop()
         self.keys.pop()
@@ -79,20 +79,20 @@ class ModelWalker:
         self.keys.append(dict())
         return child
 
-    def go_to(self, path: ModelPath, module: Optional[str] = None):
+    def go_to(self, path: ModelPath, _module: Optional[str] = None):
         for p in path._path:
             if not p.is_lazy_bound():
                 try:
                     self.go_to_child(p)
-                except SrosMgmtError as e:
-                    raise InvalidPathError(*e.args) from None
+                except err.SrosMgmtError as e:
+                    raise err.InvalidPathError(*e.args) from None
                 continue
 
             if p.name == '..':
                 self.go_to_parent()
                 continue
 
-            #prefix = self.path[-1].name.prefix if self.path else None
+            # prefix = self.path[-1].name.prefix if self.path else None
             prefix = None
 
             try:
@@ -100,8 +100,8 @@ class ModelWalker:
                     self.go_to_child(Identifier(prefix, p.name))
                 else:
                     self.go_to_child(p.name)
-            except SrosMgmtError as e:
-                raise InvalidPathError(*e.args) from None
+            except err.SrosMgmtError as e:
+                raise err.InvalidPathError(*e.args) from None
 
     def check_child_field_value(self, name: Union[str, Identifier], value, *, json=False, strict=False):
         with self.visit_child(name):
@@ -110,10 +110,17 @@ class ModelWalker:
     def check_field_value(self, value, *, json=False, strict=False, is_convert=False, metadata=None):
         if self.get_dds() == Model.StatementType.leaf_list_:
             if not isinstance(value, list):
-                raise make_exception(pysros_err_leaflist_should_be_list, type_name=value.__class__.__name__)
-            return all(self.get_type().check_field_value(i, json=json, strict=strict, is_convert=is_convert, metadata=metadata) for i in value)
+                raise make_exception(err.pysros_err_leaflist_should_be_list, type_name=value.__class__.__name__)
+            return all(
+                self.get_type().check_field_value(
+                    i, json=json, strict=strict, is_convert=is_convert, metadata=metadata,
+                )
+                for i in value
+            )
         elif self.get_dds() == Model.StatementType.leaf_:
-            return self.get_type().check_field_value(value, json=json, strict=strict, is_convert=is_convert, metadata=metadata)
+            return self.get_type().check_field_value(
+                value, json=json, strict=strict, is_convert=is_convert, metadata=metadata,
+            )
         else:
             assert False, "Checking field value for non-field walker"
 
@@ -161,7 +168,10 @@ class ModelWalker:
                 i = (i,)
             if (len(self.get_local_key_names()) != len(i)):
                 return False
-            if not all(self.check_child_field_value(key_name, key_val, strict=True) for key_name, key_val in zip(self.get_local_key_names(), i)):
+            if not all(
+                self.check_child_field_value(key_name, key_val, strict=True)
+                for key_name, key_val in zip(self.get_local_key_names(), i)
+            ):
                 return False
         return all(isinstance(v, (dict, Container)) for v in value.values())
 
@@ -203,7 +213,14 @@ class ModelWalker:
                 if child.data_def_stm in (Model.StatementType.module_, Model.StatementType.submodule_):
                     children.extend(child.children)
                     continue
-                if child.data_def_stm in (Model.StatementType.container_, Model.StatementType.list_, Model.StatementType.leaf_, Model.StatementType.leaf_list_, Model.StatementType.choice_, Model.StatementType.case_, ):
+                if child.data_def_stm in (
+                    Model.StatementType.container_,
+                    Model.StatementType.list_,
+                    Model.StatementType.leaf_,
+                    Model.StatementType.leaf_list_,
+                    Model.StatementType.choice_,
+                    Model.StatementType.case_,
+                ):
                     with self.visit_child(child.name.name):
                         _dump_json(self, parent_data)
         root_data = {"children": []}
@@ -225,7 +242,7 @@ class ModelWalker:
     @contextlib.contextmanager
     def visit_parent(self):
         if not self.path:
-            raise make_exception(pysros_err_cannot_call_go_to_parent)
+            raise make_exception(err.pysros_err_cannot_call_go_to_parent)
         keys, model = self.keys.pop(), self.path.pop()
         try:
             yield
@@ -275,7 +292,7 @@ class ModelWalker:
 
     @property
     def is_local_key(self):
-        return self.get_name().name in self.get_parent().get_local_key_names()
+        return self.current.is_local_key
 
     def has_child(self, child_name: Union[str, Identifier] = None):
         if child_name:
@@ -295,10 +312,10 @@ class ModelWalker:
             if isinstance(filter, Container):
                 filter = filter.data
             if not isinstance(filter, dict):
-                raise make_exception(pysros_err_filter_should_be_dict)
+                raise make_exception(err.pysros_err_filter_should_be_dict)
             unwrap = lambda v: v.data if isinstance(v, Leaf) else v
             if any(unwrap(v) == '' for v in filter.values()):
-                raise make_exception(pysros_err_filter_empty_string)
+                raise make_exception(err.pysros_err_filter_empty_string)
             for k, v in filter.items():
                 with self.visit_child(k):
                     self.validate_get_filter(v)
@@ -309,12 +326,12 @@ class ModelWalker:
                 filter = filter.data
             if isinstance(filter, dict):
                 if filter:
-                    raise make_exception(pysros_err_filter_wrong_leaf_value, leaf_name=self.get_name().name)
+                    raise make_exception(err.pysros_err_filter_wrong_leaf_value, leaf_name=self.get_name().name)
             elif isinstance(filter, str):
                 pass
             elif not self.check_field_value(filter, strict=True):
                 raise make_exception(
-                    pysros_err_incorrect_leaf_value,
+                    err.pysros_err_incorrect_leaf_value,
                     leaf_name=self.get_name().name
                 )
 
@@ -365,12 +382,12 @@ class ModelWalker:
                             i = next(iterator)
                             c = cls.escaped_chars.get(i, False)
                             if not c:
-                                raise make_exception(pysros_err_invalid_parse_error)
+                                raise make_exception(err.pysros_err_invalid_parse_error)
                             res.append(c)
                         else:
                             res.append(i)
                     except StopIteration:
-                        raise make_exception(pysros_err_unended_quoted_string)
+                        raise make_exception(err.pysros_err_unended_quoted_string)
                 yield (cls._TokenKind.string, "".join(res))
                 res = []
                 continue
@@ -383,7 +400,7 @@ class ModelWalker:
                             break
                         res.append(i)
                     except StopIteration:
-                        raise make_exception(pysros_err_unended_quoted_string)
+                        raise make_exception(err.pysros_err_unended_quoted_string)
                 yield (cls._TokenKind.string, "".join(res))
                 res = []
                 continue
@@ -394,34 +411,34 @@ class ModelWalker:
         res = cls.path_parse(model_root, path, sros, verify_keys)
         assert isinstance(res, ModelWalker)
         if not accept_root and res.is_root:
-            raise make_exception(pysros_err_root_path)
+            raise make_exception(err.pysros_err_root_path)
         return res
 
     @classmethod
     def path_parse(cls, model_root, path_string, sros, verify_keys):
         assert isinstance(verify_keys, bool)
         if not isinstance(path_string, str):
-            raise make_exception(pysros_err_path_should_be_string)
+            raise make_exception(err.pysros_err_path_should_be_string)
 
         if path_string == "/":
             return cls(model_root, sros)
 
         if not path_string.startswith('/'):
             if not path_string:
-                raise make_exception(pysros_err_empty_path)
-            raise make_exception(pysros_err_not_found_slash_before_name)
+                raise make_exception(err.pysros_err_empty_path)
+            raise make_exception(err.pysros_err_not_found_slash_before_name)
         if path_string.endswith('/'):
-            raise make_exception(pysros_err_invalid_identifier)
+            raise make_exception(err.pysros_err_invalid_identifier)
 
         correct_char = lambda c: 32 <= ord(c) <= 127 or c in '\t\r\n'
         if any(not correct_char(c) for c in path_string):
-            raise make_exception(pysros_err_invalid_parse_error)
+            raise make_exception(err.pysros_err_invalid_parse_error)
 
         iterator = iter(cls._tokenize(path_string))
 
-        def next_token(*accepts, err,  **kwarg):
+        def next_token(*accepts, error_def, **kwarg):
             """Verify a next token from path and return tuple(kind, token) if no errors.
-                Otherwise, raise make_exception(err, **kwarg).
+                Otherwise, raise make_exception(error_def, **kwarg).
 
 :param accepts: Contains a list of the following:
     - one of '/', '[', ']' or '=' - Function accepts specified symbol.
@@ -440,25 +457,25 @@ class ModelWalker:
                     return n
             elif 'string' in accepts:
                 return n
-            raise make_exception(err, **kwarg)
+            raise make_exception(error_def, **kwarg)
 
         res = cls(model_root, sros)
         missing_keys = set()
         elem = 'root'
 
         while True:
-            _, i = next_token('/', '[', None, err=pysros_err_not_found_slash_before_name)
-            if i == None:
+            _, i = next_token('/', '[', None, error_def=err.pysros_err_not_found_slash_before_name)
+            if i is None:
                 if (
                     missing_keys
                     and len(missing_keys) != len(res.current.local_keys)
                 ):
-                    raise make_exception(pysros_err_missing_keys, element=elem)
+                    raise make_exception(err.pysros_err_missing_keys, element=elem)
                 break
             if i == "/":
                 if missing_keys:
-                    raise make_exception(pysros_err_missing_keys, element=elem)
-                _, elem = next_token('string', None, err=pysros_err_invalid_identifier)
+                    raise make_exception(err.pysros_err_missing_keys, element=elem)
+                _, elem = next_token('string', None, error_def=err.pysros_err_invalid_identifier)
                 try:
                     res.go_to_child(elem)
                     missing_keys.update(res.current.local_keys)
@@ -468,28 +485,28 @@ class ModelWalker:
                         missing_keys.update(res.current.local_keys)
                     except Exception:
                         raise make_exception(
-                            pysros_err_unknown_element,
+                            err.pysros_err_unknown_element,
                             element=elem) from None
                 continue
             if i == "[":
                 _, key_name = next_token(
-                    'string', err=pysros_err_invalid_identifier
+                    'string', error_def=err.pysros_err_invalid_identifier
                 )
                 if verify_keys:
-                    next_token('=', err=pysros_err_expected_equal_operator)
+                    next_token('=', error_def=err.pysros_err_expected_equal_operator)
                     _, value = next_token(
-                        'string', err=pysros_err_invalid_identifier
+                        'string', error_def=err.pysros_err_invalid_identifier
                     )
-                next_token(']', err=pysros_err_expected_end_bracket)
+                next_token(']', error_def=err.pysros_err_expected_end_bracket)
                 if key_name not in missing_keys:
                     try:
                         res._get_child(key_name)
                     except Exception:
                         raise make_exception(
-                            pysros_err_unknown_key, key_name=key_name
+                            err.pysros_err_unknown_key, key_name=key_name
                         )
                     raise make_exception(
-                        pysros_err_cannot_specify_non_key_leaf
+                        err.pysros_err_cannot_specify_non_key_leaf
                     )
                 missing_keys.remove(key_name)
                 if verify_keys:
@@ -501,7 +518,7 @@ class ModelWalker:
         # absolute schema id has form: absolute-schema-nodeid = 1*("/" node-identifier)
         # leaf-ref form allows also predicates and a ".." inside paths
         if not path.startswith(('/', '../')):
-            raise make_exception(pysros_err_invalid_yang_path, path=path)
+            raise make_exception(err.pysros_err_invalid_yang_path, path=path)
 
         _end = None, ''
         t = Token()
@@ -517,7 +534,7 @@ class ModelWalker:
 
         while True:
             if t.kind != cls._TokenKind.string:
-                raise make_exception(pysros_err_invalid_yang_path, path=path)
+                raise make_exception(err.pysros_err_invalid_yang_path, path=path)
             yield t.value
             next_token(t)
 
@@ -535,15 +552,18 @@ class ModelWalker:
             if t.kind is None:
                 return
 
-            raise make_exception(pysros_err_invalid_yang_path, path=path)
+            raise make_exception(err.pysros_err_invalid_yang_path, path=path)
 
     def __str__(self):
-        return "/" + "/".join(str(name.name) + "".join(f"[{key}={value}]" for key, value in keys.items()) for name, keys in zip(self.path, self.keys))
+        return "/" + "/".join(
+            str(name.name) + "".join(f"[{key}={value}]" for key, value in keys.items())
+            for name, keys in zip(self.path, self.keys)
+        )
 
     def has_unique_child(self, child_name: str):
         try:
             self._get_child(child_name)
-        except SrosMgmtError:
+        except err.SrosMgmtError:
             return False
         return True
 
@@ -552,17 +572,21 @@ class ModelWalker:
         res = None
         while children:
             child = children.pop()
-            if child.name == child_name and child.data_def_stm in self._expected_dds and self._is_allowed(child):
+
+            if (
+                child.name == child_name
+                and child.data_def_stm in self._expected_dds and self._is_allowed(child)
+            ):
                 if res is None:
                     res = child
                 else:
-                    raise make_exception(pysros_err_ambiguous_model_node)
+                    raise make_exception(err.pysros_err_ambiguous_model_node)
             if child.data_def_stm in self._recursive_visited_dds:
                 children.extend(child.children)
         if res is not None:
             return res
         raise make_exception(
-            pysros_err_unknown_child,
+            err.pysros_err_unknown_child,
             child_name=child_name,
             path=self._get_path()
         )
@@ -593,13 +617,13 @@ class ModelWalker:
 
 
 class DataModelWalker(ModelWalker):
-    _expected_dds = (
+    _expected_dds: ClassVar[Tuple[Model.StatementType, ...]] = (
         Model.StatementType.container_, Model.StatementType.list_,
         Model.StatementType.leaf_, Model.StatementType.leaf_list_,
         Model.StatementType.action_, Model.StatementType.input_,
         Model.StatementType.output_
     )
-    _recursive_visited_dds = (
+    _recursive_visited_dds: ClassVar[Tuple[Model.StatementType, ...]] = (
         Model.StatementType.module_, Model.StatementType.submodule_,
         Model.StatementType.uses_, Model.StatementType.augment_,
         Model.StatementType.choice_, Model.StatementType.case_
@@ -607,7 +631,7 @@ class DataModelWalker(ModelWalker):
 
 
 class FilteredDataModelWalker(DataModelWalker):
-    _expected_dds = (
+    _expected_dds: ClassVar[Tuple[Model.StatementType, ...]] = (
         Model.StatementType.container_, Model.StatementType.list_,
         Model.StatementType.leaf_, Model.StatementType.leaf_list_
     )
@@ -631,7 +655,7 @@ class FilteredDataModelWalker(DataModelWalker):
         parent_module_name = None
         for node in self.path:
             current_module_name = node.name.prefix
-            current_node_name   = f"{node.name.name}"
+            current_node_name = f"{node.name.name}"
             if node.data_def_stm == AModel.StatementType.list_:
                 current_node_name += "".join((f"[{key}]" for key in node.local_keys))
             if parent_module_name != current_module_name:
@@ -660,7 +684,7 @@ class FilteredDataModelWalker(DataModelWalker):
         if self.current is None:
             return
         if not self.is_root:
-            if self.current.name.name in self.current.parent.local_keys:
+            if self.current.is_local_key:
                 return
             if self.current.status:
                 if action_io in ("input", "output"):
@@ -681,7 +705,7 @@ class ActionInputFilteredDataModelWalker(FilteredDataModelWalker):
         Model.StatementType.leaf_, Model.StatementType.leaf_list_,
         Model.StatementType.action_
     )
-    _recursive_visited_dds = (
+    _recursive_visited_dds: ClassVar[Tuple[Model.StatementType, ...]] = (
         Model.StatementType.module_, Model.StatementType.submodule_,
         Model.StatementType.uses_, Model.StatementType.augment_,
         Model.StatementType.choice_, Model.StatementType.case_,
@@ -695,12 +719,13 @@ class ActionOutputFilteredDataModelWalker(FilteredDataModelWalker):
         Model.StatementType.leaf_, Model.StatementType.leaf_list_,
         Model.StatementType.action_
     )
-    _recursive_visited_dds = (
+    _recursive_visited_dds: ClassVar[Tuple[Model.StatementType, ...]] = (
         Model.StatementType.module_, Model.StatementType.submodule_,
         Model.StatementType.uses_, Model.StatementType.augment_,
         Model.StatementType.choice_, Model.StatementType.case_,
         Model.StatementType.output_
     )
+
 
 class JsonInstanceModelWalkerWithActionInput(ActionInputFilteredDataModelWalker):
     def export_paths(self):
@@ -721,6 +746,7 @@ class JsonInstanceModelWalkerWithActionOutput(ActionOutputFilteredDataModelWalke
 class JsonInstanceModelWalkerActionOnly(ActionInputFilteredDataModelWalker):
     def export_paths(self):
         yield from self.iterate_children(enter_fnc=self._export_paths, action_io="action_only")
+
 
 class JsonInstanceDataModelWalker(FilteredDataModelWalker):
     def export_paths(self):

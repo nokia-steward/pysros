@@ -1,15 +1,21 @@
 TAGS_WITH_MODEL = (
-     "container", "list", "leaf", "typedef", "module", "submodule", "uses",
-     "leaf-list", "import", "identity", "notification", "rpc", "belongs-to",
-     "input", "output", "choice", "case", "deviate", "action",
+    "container", "list", "leaf", "typedef", "module", "submodule", "uses",
+    "leaf-list", "import", "identity", "notification", "rpc", "belongs-to",
+    "input", "output", "choice", "case", "deviate", "action",
+)
+# RFC 7950 statements represented by a model and supporting a status substatement.
+TAGS_WITH_MODEL_STATUS = (
+    "action", "augment", "case", "choice", "container", "grouping",
+    "identity", "leaf", "leaf-list", "list", "notification", "rpc",
+    "typedef", "uses",
 )
 TAGS_WITH_IMPLICIT_CASE = (
     "anydata", "anyxml", "choice", "container", "leaf",
     "list", "leaf-list",
 )
 TAGS_FORCE_MODULE = (
-     "grouping", "identity", "typedef", "uses", "augment",
-     "deviation", "type", "base", "refine",
+    "grouping", "identity", "typedef", "uses", "augment",
+    "deviation", "type", "base", "refine",
 )
 TAGS_ARG_IS_IDENTIFIER = ("base", "type", )
 TAGS_ARG_IS_YANG_PATH_NOT_ABSOLUTE_SCHEMA_ID = ("path", )

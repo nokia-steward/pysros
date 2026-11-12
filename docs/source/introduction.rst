@@ -253,7 +253,7 @@ The obtained file can be unzipped and subsequently installed using:
 
 .. code-block:: python3
 
-   python3 setup.py install
+   python3 -m pip install .
 
 
 .. Reviewed by PLM 20210902
@@ -270,7 +270,7 @@ The obtained file can be installed using the ``git`` tool:
 .. code-block:: python3
 
    git clone https://github.com/nokia/pysros
-   python3 setup.py install
+   python3 -m pip install .
 
 
 .. Reviewed by PLM 20210902

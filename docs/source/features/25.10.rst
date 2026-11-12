@@ -1,6 +1,13 @@
 Release 25.10
 *************
 
+25.10.8
+#######
+
+* Moves packaging configuration from ``setup.py`` to ``pyproject.toml``
+* Updates the minimum required version of ``ncclient`` to 0.7.1
+* Updates the minimum required version of ``lxml`` to 6.1.0
+
 25.10.7
 #######
 
